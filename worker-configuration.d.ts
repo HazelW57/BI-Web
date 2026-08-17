@@ -11,6 +11,7 @@ interface __BaseEnv_Env {
 	SESSION_SECRET: string;
 	PRIMARY_BOOTSTRAP_PASSWORD: string;
 	RECOVERY_BOOTSTRAP_PASSWORD: string;
+	AUTH_PASSWORD_VERSION: string;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
@@ -23,5 +24,5 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "TIKTOK_API_BASE_URL" | "TIKTOK_ORDER_API_VERSION" | "TIKTOK_RETURNS_API_VERSION" | "TIKTOK_FINANCE_API_VERSION" | "SESSION_SECRET" | "PRIMARY_BOOTSTRAP_PASSWORD" | "RECOVERY_BOOTSTRAP_PASSWORD">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "TIKTOK_API_BASE_URL" | "TIKTOK_ORDER_API_VERSION" | "TIKTOK_RETURNS_API_VERSION" | "TIKTOK_FINANCE_API_VERSION" | "SESSION_SECRET" | "PRIMARY_BOOTSTRAP_PASSWORD" | "RECOVERY_BOOTSTRAP_PASSWORD" | "AUTH_PASSWORD_VERSION">> {}
 }
