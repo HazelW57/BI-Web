@@ -1,6 +1,6 @@
 # Saphiant Commerce BI
 
-Internal BI portal for `bi.saphiant.com`, deployed as a Cloudflare Worker with a Cloudflare D1 database.
+Internal BI portal for `bi.saphiant.com`, deployed through Cloudflare Pages to a Cloudflare Worker with a Cloudflare D1 database.
 
 ## Modules
 
@@ -43,12 +43,27 @@ pnpm exec wrangler deploy --dry-run
 
 ## Cloudflare deployment
 
-The production Worker is configured in `wrangler.jsonc`:
+The production application Worker is configured in `wrangler.jsonc`:
 
 - Worker: `bi-web`
 - D1: `saphiant-bi` bound as `DB`
-- Custom domain: `bi.saphiant.com`
 - TikTok scheduled sync: every six hours
+
+`pages-gateway/` is the Git-connected Cloudflare Pages entry point for the
+custom domain. Pages terminates TLS for `bi.saphiant.com` without moving the
+`saphiant.com` nameservers, then forwards requests to `bi-web` through the
+private `BI_WEB` Service binding. The Worker continues to own the application,
+D1 binding, encrypted secrets, and scheduled synchronization.
+
+Pages project settings:
+
+- Project: `saphiant-bi-pages`
+- Root directory: `pages-gateway`
+- Build command: leave blank
+- Build output directory: `dist`
+- Production branch: `main`
+- Service binding: `BI_WEB` -> `bi-web`
+- Custom domain: `bi.saphiant.com`
 
 Apply the D1 migration before the first release:
 
