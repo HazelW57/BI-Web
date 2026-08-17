@@ -3,7 +3,7 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
 export const PRIMARY_ADMIN_EMAIL = "hazel.w@saphiant.com";
-const RECOVERY_ADMIN_EMAIL = "hazel.hanyu.w@outlook.com";
+export const RECOVERY_ADMIN_EMAIL = "hazel.hanyu.w@outlook.com";
 const COOKIE_NAME = "saphiant_session";
 const encoder = new TextEncoder();
 
@@ -49,7 +49,10 @@ async function verifyPassword(password: string, expected: string, salt: string) 
 }
 
 async function ensureAuth() {
-  const { DB, PRIMARY_BOOTSTRAP_PASSWORD, RECOVERY_BOOTSTRAP_PASSWORD } = runtime();
+  const { DB, PRIMARY_BOOTSTRAP_PASSWORD, RECOVERY_BOOTSTRAP_PASSWORD, SESSION_SECRET } = runtime();
+  if (!SESSION_SECRET || !PRIMARY_BOOTSTRAP_PASSWORD || !RECOVERY_BOOTSTRAP_PASSWORD) {
+    throw new Error("Authentication secrets are not configured");
+  }
   await DB.prepare(`CREATE TABLE IF NOT EXISTS auth_users (
     email TEXT PRIMARY KEY, password_hash TEXT NOT NULL, salt TEXT NOT NULL,
     role TEXT NOT NULL, hidden INTEGER NOT NULL DEFAULT 0,
@@ -58,26 +61,30 @@ async function ensureAuth() {
   await DB.prepare("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)").run();
   const admins = [
     [PRIMARY_ADMIN_EMAIL, "owner", 0, PRIMARY_BOOTSTRAP_PASSWORD],
-    [RECOVERY_ADMIN_EMAIL, "recovery", 1, RECOVERY_BOOTSTRAP_PASSWORD],
+    [RECOVERY_ADMIN_EMAIL, "recovery", 0, RECOVERY_BOOTSTRAP_PASSWORD],
   ] as const;
   for (const [email, role, hidden, password] of admins) {
     const exists = await DB.prepare("SELECT email FROM auth_users WHERE email = ?").bind(email).first();
     if (!exists) {
-      if (!password) throw new Error("Bootstrap password is not configured");
       const credential = await hashPassword(password);
       const now = Date.now();
       await DB.prepare("INSERT INTO auth_users (email,password_hash,salt,role,hidden,created_at,updated_at) VALUES (?,?,?,?,?,?,?)")
         .bind(email, credential.hash, credential.salt, role, hidden, now, now).run();
+    } else {
+      await DB.prepare("UPDATE auth_users SET role=?, hidden=? WHERE email=?")
+        .bind(role, hidden, email).run();
     }
   }
-  const passwordVersion = runtime().PRIMARY_PASSWORD_VERSION;
+  const passwordVersion = runtime().AUTH_PASSWORD_VERSION ?? runtime().PRIMARY_PASSWORD_VERSION;
   if (passwordVersion) {
-    const applied = await DB.prepare("SELECT value FROM app_settings WHERE key = 'primary_password_version'").first<{value:string}>();
+    const applied = await DB.prepare("SELECT value FROM app_settings WHERE key = 'admin_password_version'").first<{value:string}>();
     if (applied?.value !== passwordVersion) {
-      const credential = await hashPassword(PRIMARY_BOOTSTRAP_PASSWORD);
-      await DB.prepare("UPDATE auth_users SET password_hash=?, salt=?, updated_at=? WHERE email=?")
-        .bind(credential.hash, credential.salt, Date.now(), PRIMARY_ADMIN_EMAIL).run();
-      await DB.prepare("INSERT OR REPLACE INTO app_settings (key,value) VALUES ('primary_password_version',?)").bind(passwordVersion).run();
+      for (const [email, , , password] of admins) {
+        const credential = await hashPassword(password);
+        await DB.prepare("UPDATE auth_users SET password_hash=?, salt=?, updated_at=? WHERE email=?")
+          .bind(credential.hash, credential.salt, Date.now(), email).run();
+      }
+      await DB.prepare("INSERT OR REPLACE INTO app_settings (key,value) VALUES ('admin_password_version',?)").bind(passwordVersion).run();
     }
   }
 }
