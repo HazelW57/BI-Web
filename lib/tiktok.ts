@@ -37,6 +37,12 @@ function hex(bytes: ArrayBuffer) {
   return [...new Uint8Array(bytes)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
 
+async function runBatches(db: D1Database, statements: D1PreparedStatement[], size = 250) {
+  for (let index = 0; index < statements.length; index += size) {
+    await db.batch(statements.slice(index, index + size));
+  }
+}
+
 async function signRequest(path: string, params: Record<string, string>, bodyText: string, secret: string) {
   const sorted = Object.entries(params)
     .filter(([key]) => key !== "sign" && key !== "access_token")
@@ -87,7 +93,7 @@ async function fetchOrders(env: BiEnv, fromSeconds: number, toSeconds: number) {
   const path = `/order/${version}/orders/search`;
   const orders: JsonRecord[] = [];
   let pageToken = "";
-  for (let page = 0; page < 20; page += 1) {
+  for (let page = 0; page < 10; page += 1) {
     const data = await tiktokRequest(env, path, {
       method: "POST",
       query: {
@@ -108,6 +114,7 @@ async function fetchOrders(env: BiEnv, fromSeconds: number, toSeconds: number) {
 async function upsertOrders(env: BiEnv, orders: JsonRecord[]) {
   let count = 0;
   const now = Date.now();
+  const statements: D1PreparedStatement[] = [];
   for (const order of orders) {
     const orderId = stringValue(order.id, order.order_id);
     if (!orderId) continue;
@@ -123,7 +130,7 @@ async function upsertOrders(env: BiEnv, orders: JsonRecord[]) {
       const sellerDiscount = lines.length === 1 ? Math.abs(numberValue(payment.seller_discount, 0)) : 0;
       const shippingRevenue = lines.length === 1 ? numberValue(payment.shipping_fee, 0) : 0;
       const currency = stringValue(line.currency, payment.currency, order.currency) || "USD";
-      await env.DB.prepare(`INSERT INTO sales_lines (
+      statements.push(env.DB.prepare(`INSERT INTO sales_lines (
         id, order_id, line_item_id, sku, product_name, quantity, currency, order_status, ordered_at,
         gross_sales, seller_discount, shipping_revenue, raw_json, updated_at
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -134,10 +141,11 @@ async function upsertOrders(env: BiEnv, orders: JsonRecord[]) {
         shipping_revenue=excluded.shipping_revenue, raw_json=excluded.raw_json, updated_at=excluded.updated_at`)
         .bind(`${orderId}:${lineId}`, orderId, lineId, sku, stringValue(line.product_name, line.sku_name, line.display_name), quantity,
           currency, stringValue(order.status, order.order_status) || "UNKNOWN", timestampValue(order.create_time ?? order.created_at),
-          grossSales, sellerDiscount, shippingRevenue, JSON.stringify({ order, line }), now).run();
+          grossSales, sellerDiscount, shippingRevenue, JSON.stringify({ order, line }), now));
       count += 1;
     }
   }
+  await runBatches(env.DB, statements);
   return count;
 }
 
@@ -146,7 +154,7 @@ async function fetchReturns(env: BiEnv, fromSeconds: number, toSeconds: number) 
   const path = `/return_refund/${version}/returns/search`;
   const returns: JsonRecord[] = [];
   let pageToken = "";
-  for (let page = 0; page < 20; page += 1) {
+  for (let page = 0; page < 10; page += 1) {
     const data = await tiktokRequest(env, path, {
       method: "POST",
       query: { page_size: "100", sort_field: "create_time", sort_order: "ASC", ...(pageToken ? { page_token: pageToken } : {}) },
@@ -162,6 +170,7 @@ async function fetchReturns(env: BiEnv, fromSeconds: number, toSeconds: number) 
 async function upsertReturns(env: BiEnv, returns: JsonRecord[]) {
   let count = 0;
   const now = Date.now();
+  const statements: D1PreparedStatement[] = [];
   for (const item of returns) {
     const returnId = stringValue(item.return_id, item.id);
     const orderId = stringValue(item.order_id);
@@ -179,7 +188,7 @@ async function upsertReturns(env: BiEnv, returns: JsonRecord[]) {
       }
       const reason = stringValue(line.return_reason_text, line.return_reason, item.return_reason_text, item.return_reason, item.buyer_return_reason) || "未分类";
       const refund = numberValue(line.refund_amount ?? item.refund_amount, 0);
-      await env.DB.prepare(`INSERT INTO return_lines (
+      statements.push(env.DB.prepare(`INSERT INTO return_lines (
         id, return_id, order_id, line_item_id, sku, reason, return_type, status,
         quantity, refund_amount, requested_at, raw_json, updated_at
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -190,10 +199,11 @@ async function upsertReturns(env: BiEnv, returns: JsonRecord[]) {
         .bind(`${returnId}:${lineId}`, returnId, orderId, lineId, sku || "UNKNOWN-SKU", reason,
           stringValue(item.return_type, item.type) || "RETURN", stringValue(item.return_status, item.status) || "UNKNOWN",
           Math.max(1, Math.round(numberValue(line.quantity, 1))), Math.abs(refund),
-          timestampValue(item.create_time ?? item.created_at ?? item.request_time), JSON.stringify({ item, line }), now).run();
+          timestampValue(item.create_time ?? item.created_at ?? item.request_time), JSON.stringify({ item, line }), now));
       count += 1;
     }
   }
+  await runBatches(env.DB, statements);
   return count;
 }
 
@@ -243,7 +253,7 @@ export async function syncTikTok(env: BiEnv, days = 7) {
     const returns = await fetchReturns(env, fromSeconds, toSeconds);
     const returnsUpserted = await upsertReturns(env, returns);
     const pendingFinance = await env.DB.prepare(`SELECT DISTINCT order_id AS orderId FROM sales_lines
-      WHERE financial_net_sales IS NULL ORDER BY ordered_at DESC LIMIT 100`).all<{ orderId: string }>();
+      WHERE financial_net_sales IS NULL ORDER BY ordered_at DESC LIMIT 5`).all<{ orderId: string }>();
     let financeWarnings = 0;
     for (const { orderId } of pendingFinance.results) {
       try { await applyFinance(env, orderId); }
