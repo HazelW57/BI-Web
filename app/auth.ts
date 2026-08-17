@@ -12,7 +12,7 @@ export type Session = { email: string; role: Role; exp: number };
 export type VisibleUser = { email: string; role: Role; createdAt: number };
 
 function runtime() {
-  return env as unknown as { DB: D1Database; SESSION_SECRET: string; PRIMARY_BOOTSTRAP_PASSWORD: string; PRIMARY_PASSWORD_VERSION?: string; RECOVERY_BOOTSTRAP_PASSWORD: string };
+  return env;
 }
 
 function toBase64(bytes: Uint8Array) {

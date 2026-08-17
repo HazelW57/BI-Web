@@ -1,0 +1,34 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "bi-web",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-08-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "routes": [
+    { "pattern": "bi.saphiant.com", "custom_domain": true }
+  ],
+  "triggers": {
+    "crons": ["0 */6 * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "invocation_logs": true }
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "saphiant-bi",
+      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "images": { "binding": "IMAGES" },
+  "assets": { "binding": "ASSETS", "run_worker_first": true },
+  "vars": {
+    "TIKTOK_API_BASE_URL": "https://open-api.tiktokglobalshop.com",
+    "TIKTOK_ORDER_API_VERSION": "202309",
+    "TIKTOK_RETURNS_API_VERSION": "202602",
+    "TIKTOK_FINANCE_API_VERSION": "202501"
+  }
+}

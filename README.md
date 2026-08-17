@@ -1,98 +1,73 @@
-# vinext-starter
+# Saphiant Commerce BI
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+Internal BI portal for `bi.saphiant.com`, deployed as a Cloudflare Worker with a Cloudflare D1 database.
 
-## Prerequisites
+## Modules
 
-- Node.js `>=22.13.0`
+- BBY, Walmart, and Price Verification navigation placeholders
+- TTS P&L Summary with month and SKU views
+- TTS R&R with return rate and return-reason share by SKU
+- TTS Data Health with manual and scheduled TikTok Shop sync status
+- Settings for Hazel-only access management and CSV data uploads
 
-## Quick Start
+## Data flow
+
+TikTok Shop Order, Returns, and Finance APIs are synchronized into D1. Finance transactions are matched to order lines by:
+
+1. `order_id + line_item_id`
+2. `order_id + seller_sku` when the finance record has no usable line-item ID
+
+P&L uses Finance API net sales and settlement values when matched, then falls back to the order-side estimate. Product cost and Video/LIVE agency fees are uploaded from the templates in `public/templates/`; a successful upload is immediately reflected in the next P&L query.
+
+## Local development
+
+Requires Node.js 22.13+ and pnpm.
 
 ```bash
-npm install
-npm run dev
-npm run build
+pnpm install --frozen-lockfile
+cp .env.example .dev.vars
+pnpm run db:migrate:local
+pnpm run dev
 ```
 
-This starter does not use `wrangler.jsonc`.
+Do not commit `.dev.vars` or real credentials.
 
-## Included Shape
+## Validation
 
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
-
-## Workspace Auth Headers
-
-OpenAI workspace sites can read the current user's email from
-`oai-authenticated-user-email`.
-
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
+```bash
+pnpm run cf:typegen
+pnpm run lint
+pnpm run test
+pnpm exec wrangler deploy --dry-run
 ```
 
-## Optional Dispatch-Owned ChatGPT Sign-In
+## Cloudflare deployment
 
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
+The production Worker is configured in `wrangler.jsonc`:
 
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
+- Worker: `bi-web`
+- D1: `saphiant-bi` bound as `DB`
+- Custom domain: `bi.saphiant.com`
+- TikTok scheduled sync: every six hours
 
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
+Apply the D1 migration before the first release:
 
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
+```bash
+pnpm run db:migrate:remote
+```
 
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
+Configure these as encrypted Worker secrets:
 
-## Useful Commands
+- `SESSION_SECRET`
+- `PRIMARY_BOOTSTRAP_PASSWORD`
+- `RECOVERY_BOOTSTRAP_PASSWORD`
+- `TIKTOK_APP_KEY`
+- `TIKTOK_APP_SECRET`
+- `TIKTOK_ACCESS_TOKEN`
+- `TIKTOK_SHOP_CIPHER`
 
-- `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
+Then deploy with:
 
-## Learn More
-
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+```bash
+pnpm run deploy
+```
