@@ -5,9 +5,6 @@
   "compatibility_date": "2026-08-17",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
-  "routes": [
-    { "pattern": "bi.saphiant.com", "custom_domain": true }
-  ],
   "triggers": {
     "crons": ["0 */6 * * *"]
   },
