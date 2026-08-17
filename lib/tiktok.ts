@@ -88,10 +88,16 @@ async function fetchOrders(env: BiEnv, fromSeconds: number, toSeconds: number) {
   const orders: JsonRecord[] = [];
   let pageToken = "";
   for (let page = 0; page < 20; page += 1) {
-    const data = await tiktokRequest(env, path, { query: {
-      create_time_ge: String(fromSeconds), create_time_lt: String(toSeconds), page_size: "100", sort_order: "ASC",
-      ...(pageToken ? { page_token: pageToken } : {}),
-    }});
+    const data = await tiktokRequest(env, path, {
+      method: "POST",
+      query: {
+        page_size: "100",
+        sort_field: "create_time",
+        sort_order: "ASC",
+        ...(pageToken ? { page_token: pageToken } : {}),
+      },
+      body: { create_time_ge: fromSeconds, create_time_lt: toSeconds },
+    });
     orders.push(...asArray(data.orders).map(asRecord));
     pageToken = stringValue(data.next_page_token, data.nextPageToken);
     if (!pageToken) break;
