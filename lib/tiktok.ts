@@ -157,7 +157,7 @@ async function fetchReturns(env: BiEnv, fromSeconds: number, toSeconds: number) 
   for (let page = 0; page < 10; page += 1) {
     const data = await tiktokRequest(env, path, {
       method: "POST",
-      query: { page_size: "100", sort_field: "create_time", sort_order: "ASC", ...(pageToken ? { page_token: pageToken } : {}) },
+      query: { page_size: "50", sort_field: "create_time", sort_order: "ASC", ...(pageToken ? { page_token: pageToken } : {}) },
       body: { create_time_ge: fromSeconds, create_time_lt: toSeconds },
     });
     returns.push(...asArray(data.return_orders ?? data.returns).map(asRecord));
