@@ -20,6 +20,7 @@
 html{background:var(--paper);scroll-behavior:smooth}body{background:radial-gradient(circle at 80% -10%,#dcecff 0,transparent 30%),var(--paper);color:var(--ink)}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 button,input,select,.panel,.kpi,.upload-card,.sidebar nav button{transition:all .28s cubic-bezier(.2,.7,.2,1)}
+.nav-group{display:grid;gap:3px}.bby-store-nav{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:0 8px 3px 42px}.sidebar nav .bby-store-nav button{justify-content:center;padding:6px 8px;border:1px solid #ffffff17;border-radius:7px;font-size:9px;letter-spacing:.1em}.sidebar nav .bby-store-nav button.selected{background:#e9f3ff;color:#1557d6;border-color:#8bbcf5}
 .gate{background:linear-gradient(135deg,#07172c 0%,#0b2b60 58%,#1557d6 130%)}
 .gate-copy{padding:64px 7vw}.gate-copy:before{content:"";position:absolute;inset:0;background:linear-gradient(115deg,transparent 30%,rgba(84,166,245,.08)),radial-gradient(circle at 72% 28%,rgba(37,183,211,.2),transparent 24%);pointer-events:none}.gate-copy:after{border-color:#ffffff1f;box-shadow:0 0 0 95px #2c7be510,0 0 0 190px #54a6f508}
 .brand{top:54px;z-index:1}.brand img{display:block;width:210px;height:auto;filter:brightness(0) invert(1)}

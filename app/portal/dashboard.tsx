@@ -65,6 +65,8 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
   const [previousPnl, setPreviousPnl] = useState<PnlData>(emptyPnl);
   const [returns, setReturns] = useState<ReturnsData>(emptyReturns);
   const [previousReturns, setPreviousReturns] = useState<ReturnsData>(emptyReturns);
+  const [bbyStore, setBbyStore] = useState<"SAP" | "JS">("SAP");
+  const [bbyReturns, setBbyReturns] = useState<ReturnsData>(emptyReturns);
   const [sync, setSync] = useState<SyncData>({ configured: false, lastRun: null });
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -98,6 +100,15 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
   }, [from, getJson, granularity, product, returnStatus, returnType, sku, to]);
 
   useEffect(() => { const timer = window.setTimeout(() => { void refresh(); }, 80); return () => window.clearTimeout(timer); }, [refresh]);
+
+  const refreshBby = useCallback(async () => {
+    setBusy(true); setError("");
+    try { const query=new URLSearchParams({store:bbyStore,from,to,granularity,sku}); setBbyReturns(await getJson<ReturnsData>(`/api/bby/returns?${query}`)); }
+    catch(cause){setError(cause instanceof Error?cause.message:"Best Buy 数据读取失败");} finally{setBusy(false);}
+  },[bbyStore,from,to,granularity,sku,getJson]);
+  useEffect(()=>{if(tab!=="bby")return;const timer=window.setTimeout(()=>void refreshBby(),80);return()=>window.clearTimeout(timer);},[tab,refreshBby]);
+
+  async function syncBbyNow(){setBusy(true);setError("");try{const result=await getJson<{orders:number;returns:number}>("/api/bby/sync",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({store:bbyStore,from,to})});setNotice(`Best Buy ${bbyStore} 同步完成：${result.orders} 条销售行，${result.returns} 条退款行。`);await refreshBby();}catch(cause){setError(cause instanceof Error?cause.message:"Best Buy 同步失败");setBusy(false);}}
 
   async function upload(kind: string, event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]; event.target.value = ""; if (!file) return;
@@ -200,7 +211,7 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
   return <main className="shell">
     <aside className="sidebar">
       <div className="side-brand"><img src="/saphiant-logo.png" alt="Saphiant" /><small>COMMERCE INTELLIGENCE</small></div>
-      <nav>{nav.map((item, index) => <button key={item.key} onClick={() => setTab(item.key)} className={tab === item.key ? "active" : ""}><i>0{index + 1}</i><span>{item.label}<small>{item.eyebrow}</small></span></button>)}</nav>
+      <nav>{nav.map((item, index) => <div className="nav-group" key={item.key}><button onClick={() => setTab(item.key)} className={tab === item.key ? "active" : ""}><i>0{index + 1}</i><span>{item.label}<small>{item.eyebrow}</small></span></button>{item.key==="bby"&&<div className="bby-store-nav"><button className={tab==="bby"&&bbyStore==="SAP"?"selected":""} onClick={()=>{setTab("bby");setBbyStore("SAP");setSku("ALL");}}>SAP</button><button className={tab==="bby"&&bbyStore==="JS"?"selected":""} onClick={()=>{setTab("bby");setBbyStore("JS");setSku("ALL");}}>JS</button></div>}</div>)}</nav>
       <div className="side-user"><strong>{admin ? "Hazel · Owner" : "Authorized Viewer"}</strong><small>{email}</small><button onClick={logout}>安全退出</button></div>
     </aside>
 
@@ -209,12 +220,13 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
       {tab === "tts" && <div className="subnav tts-subnav">{[
         ["pnl", "P&L Overview"], ["sales", "Sales & Orders"], ["marketing", "Marketing"], ["returns", "R&R"], ["costs", "Cost Inputs"], ["health", "Data Health"],
       ].map(([key, label]) => <button key={key} className={ttsTab === key ? "active" : ""} onClick={() => setTtsTab(key as TtsTab)}>{label}</button>)}</div>}
+      {tab === "bby" && <><div className="subnav tts-subnav"><button disabled>P&L · Next</button><button className="active">R&R</button><button onClick={()=>void syncBbyNow()} disabled={busy||!admin}>{busy?"Syncing…":`Sync ${bbyStore} Mirakl`}</button></div><GlobalFilters from={from} to={to} setFrom={setFrom} setTo={setTo} granularity={granularity} setGranularity={setGranularity} product={product} setProduct={setProduct} sku={sku} setSku={setSku} dimensions={bbyReturns.dimensions} returnsMode={false} returnType={returnType} setReturnType={setReturnType} returnStatus={returnStatus} setReturnStatus={setReturnStatus} busy={busy} refresh={refreshBby}/></>}
       {tab === "settings" && admin && <div className="subnav"><button className={settingsTab === "uploads" ? "active" : ""} onClick={() => setSettingsTab("uploads")}>数据上传</button><button className={settingsTab === "access" ? "active" : ""} onClick={() => setSettingsTab("access")}>访问管理</button></div>}
       {tab === "tts" && ttsTab !== "health" && ttsTab !== "costs" && <GlobalFilters from={from} to={to} setFrom={setFrom} setTo={setTo} granularity={granularity} setGranularity={setGranularity} product={product} setProduct={setProduct} sku={sku} setSku={setSku} dimensions={dimensions} returnsMode={ttsTab === "returns"} returnType={returnType} setReturnType={setReturnType} returnStatus={returnStatus} setReturnStatus={setReturnStatus} busy={busy} refresh={refresh} />}
       {error && <div className="message error-message">{error}<button onClick={() => setError("")}>×</button></div>}
       {notice && <div className="message success-message">{notice}<button onClick={() => setNotice("")}>×</button></div>}
 
-      {tab === "bby" && <PlatformView code="BBY" title="Best Buy Intelligence" description="为 Best Buy 销售、P&L、退货率和库存周转预留统一分析入口。" />}
+      {tab === "bby" && <ReturnsView key={`bby-${bbyStore}-${from}-${to}-${granularity}-${sku}`} data={bbyReturns} previous={emptyReturns} selectedSku={sku} onSkuSelect={setSku} platform={`Best Buy ${bbyStore} · Mirakl`} />}
       {tab === "walmart" && <PlatformView code="WMT" title="Walmart Intelligence" description="为 Walmart 订单、退货、广告和 SKU 经营表现预留统一分析入口。" />}
       {tab === "pricing" && <PlatformView code="PRICE" title="三平台价格核验" description="规划 Amazon、Walmart、Best Buy 的实时售价、基准价和异常提醒。" />}
       {busy && !pnl.trend.length && <div className="dashboard-skeleton"><i/><i/><i/><i/><i/><i/></div>}
@@ -402,11 +414,11 @@ function MarketingChart({ rows }: { rows: PnlRow[] }) {
   return <div className="marketing-chart">{rows.map((row) => { const costs = [row.adSpend, row.affiliateCommission, row.videoAgencyFees, row.liveAgencyFees]; const total = costs.reduce((a, b) => a + b, 0); return <div key={row.key} title={`${row.key}\nAd Spend ${preciseMoney.format(row.adSpend)}\nAffiliate ${preciseMoney.format(row.affiliateCommission)}\nVideo ${preciseMoney.format(row.videoAgencyFees)}\nLIVE ${preciseMoney.format(row.liveAgencyFees)}`}><div style={{ height: `${Math.max(5, total / max * 100)}%` }}>{costs.map((cost, index) => cost ? <i key={index} style={{ height: `${cost / total * 100}%`, background: palette[index + 3] }} /> : null)}</div><span>{row.key.slice(5)}</span></div>; })}</div>;
 }
 
-function ReturnsView({ data, previous, selectedSku, onSkuSelect }: { data: ReturnsData; previous: ReturnsData; selectedSku: string; onSkuSelect: (sku: string) => void }) {
+function ReturnsView({ data, previous, selectedSku, onSkuSelect, platform = "TikTok" }: { data: ReturnsData; previous: ReturnsData; selectedSku: string; onSkuSelect: (sku: string) => void; platform?: string }) {
   const selected = selectedSku !== "ALL" ? data.skus.find((row) => row.sku === selectedSku) : undefined;
   return <>
     <div className="kpi-grid returns-kpis">
-      <Kpi label="SOLD UNITS" value={number.format(data.totalSoldUnits ?? data.soldUnits)} current={data.totalSoldUnits ?? data.soldUnits} previous={previous.totalSoldUnits ?? previous.soldUnits} note="All valid sold units, including samples" source="TikTok Orders API" status="Actual" />
+      <Kpi label="SOLD UNITS" value={number.format(data.totalSoldUnits ?? data.soldUnits)} current={data.totalSoldUnits ?? data.soldUnits} previous={previous.totalSoldUnits ?? previous.soldUnits} note="All valid sold units, including samples" source={`${platform} Orders API`} status="Actual" />
       <Kpi label="SOLD UNITS · EXCL. SAMPLES" value={number.format(data.commercialSoldUnits ?? data.soldUnits)} current={data.commercialSoldUnits ?? data.soldUnits} previous={previous.commercialSoldUnits ?? previous.soldUnits} note={`${number.format(data.sampleUnits || 0)} sample units excluded`} source="TikTok Orders API order type" status="Actual" />
       <Kpi label="RETURNED UNITS" value={number.format(data.returnedUnits)} current={data.returnedUnits} previous={previous.returnedUnits} note="Completed physical returns only" source="Returns API; rejected/canceled/pending excluded" status="Actual" />
       <Kpi label="OVERALL RETURN RATE" value={`${data.returnRate.toFixed(2)}%`} current={data.returnRate} previous={previous.returnRate} note="Non-sample Returned Units ÷ Non-sample Sold Units" tone={data.returnRate > 10 ? "negative" : ""} source="Commercial sales cohort; samples excluded" status="Actual" />
@@ -423,7 +435,7 @@ function ReturnsView({ data, previous, selectedSku, onSkuSelect }: { data: Retur
       <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">RETURN RATE BY SKU · CLICK TO CROSS-FILTER</p><h2>SKU Risk Ranking</h2></div><button className="clear-filter" onClick={() => onSkuSelect("ALL")}>All SKUs</button></div><ReturnRateBars rows={data.skus} onSelect={onSkuSelect} /></section>
       {selected && <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SELECTED SKU TREND</p><h2>{selected.sku}</h2></div></div><ReturnTrend rows={selected.trend} /></section>}
     </div>
-    {selected && <div className="dashboard-grid two-up"><section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SELECTED SKU · TIKTOK PLATFORM RETURN REASONS</p><h2>{`Why ${selected.sku} Is Returned`}</h2><small>保留 TikTok Returns API 返回的原始原因，不做人工合并。</small></div></div><ReasonDistribution skus={data.skus} selected={selected} /></section><section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SKU × PLATFORM RETURN REASON MIX (100%)</p><h2>Platform Reason Composition by SKU</h2></div></div><ReasonDistribution skus={data.skus} /></section></div>}
+    {selected && <div className="dashboard-grid two-up"><section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SELECTED SKU · PLATFORM RETURN REASONS</p><h2>{`Why ${selected.sku} Is Returned`}</h2><small>保留 {platform} 返回的原始原因，不做人工合并。</small></div></div><ReasonDistribution skus={data.skus} selected={selected} /></section><section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SKU × PLATFORM RETURN REASON MIX (100%)</p><h2>Platform Reason Composition by SKU</h2></div></div><ReasonDistribution skus={data.skus} /></section></div>}
     <section className="panel source-panel"><div className="section-head"><div><p className="kicker">TRACEABILITY</p><h2>R&R 数据来源</h2></div></div><div className="source-list">{data.sources.map((source) => <div key={source.metric}><strong>{source.metric}</strong><span>{source.source}</span></div>)}</div></section>
   </>;
 }
