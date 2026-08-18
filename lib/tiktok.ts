@@ -252,7 +252,7 @@ function leafAmounts(value: unknown, prefix = "", output: { path: string; amount
 
 async function upsertAffiliateAttribution(env: BiEnv, record: JsonRecord) {
   const orderId = stringValue(record.order_id, record.id); if (!orderId) return 0;
-  const items = asArray(record.skus ?? record.products ?? record.items ?? record.order_lines).map(asRecord);
+  const items = asArray(record.skus ?? record.sku_orders ?? record.products ?? record.items ?? record.order_line_items ?? record.order_lines).map(asRecord);
   const rows = items.length ? items : [record]; let count = 0;
   for (const item of rows) {
     const skuId = stringValue(item.sku_id, item.product_id, item.id, record.sku_id, record.product_id);
