@@ -578,7 +578,6 @@ function filterSales(sales: SalesFact[], filters: SnapshotFilters) {
 }
 
 export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = {}) {
-  await ensureBiSchema(db);
   const range = periodBounds(filters.from, filters.to);
   const [salesResult, legacyCosts, costsResult, expensesResult, agencyResult, shippingResult, manualResult, returnsResult, statementsResult, affiliateResult] = await Promise.all([
     db.prepare(`${salesQuery()} WHERE s.ordered_at >= ? AND s.ordered_at < ? ORDER BY s.ordered_at`).bind(range.start, range.end).all<SalesFact>(),
@@ -665,7 +664,6 @@ export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = 
 }
 
 export async function getReturnsSnapshot(db: D1Database, filters: SnapshotFilters = {}) {
-  await ensureBiSchema(db);
   const range = periodBounds(filters.from, filters.to);
   const [salesResult, returnsResult, createdResult, shippingResult] = await Promise.all([
     db.prepare(`${salesQuery()} WHERE s.ordered_at>=? AND s.ordered_at<?`).bind(range.start, range.end).all<SalesFact>(),
@@ -695,7 +693,6 @@ export async function getReturnsSnapshot(db: D1Database, filters: SnapshotFilter
 }
 
 export async function getSyncStatus(env: BiEnv) {
-  await ensureBiSchema(env.DB);
   const lastRun = await env.DB.prepare(`SELECT id, source, status, orders_upserted AS ordersUpserted,
     returns_upserted AS returnsUpserted, message, started_at AS startedAt, completed_at AS completedAt
     FROM sync_runs ORDER BY started_at DESC LIMIT 1`).first();
