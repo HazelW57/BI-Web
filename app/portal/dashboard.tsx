@@ -69,14 +69,20 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
   const [bbyReturns, setBbyReturns] = useState<ReturnsData>(emptyReturns);
   const [sync, setSync] = useState<SyncData>({ configured: false, lastRun: null });
   const [busy, setBusy] = useState(false);
+  const [bbyBusy, setBbyBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [bbyNotice, setBbyNotice] = useState("");
+  const [bbyError, setBbyError] = useState("");
   const [items, setItems] = useState(initialAllowed);
   const [newEmail, setNewEmail] = useState("");
 
   const getJson = useCallback(async <T,>(url: string, init?: RequestInit) => {
     const response = await fetch(url, init);
-    const payload = await response.json() as T & { error?: string };
+    const text = await response.text();
+    let payload: T & { error?: string };
+    try { payload = (text ? JSON.parse(text) : {}) as T & { error?: string }; }
+    catch { throw new Error(`接口返回异常（HTTP ${response.status}）`); }
     if (!response.ok) throw new Error(payload.error || "请求失败");
     return payload;
   }, []);
@@ -102,13 +108,13 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
   useEffect(() => { const timer = window.setTimeout(() => { void refresh(); }, 80); return () => window.clearTimeout(timer); }, [refresh]);
 
   const refreshBby = useCallback(async () => {
-    setBusy(true); setError("");
+    setBbyBusy(true); setBbyError("");
     try { const query=new URLSearchParams({store:bbyStore,from,to,granularity,sku}); setBbyReturns(await getJson<ReturnsData>(`/api/bby/returns?${query}`)); }
-    catch(cause){setError(cause instanceof Error?cause.message:"Best Buy 数据读取失败");} finally{setBusy(false);}
+    catch(cause){setBbyError(cause instanceof Error?cause.message:"Best Buy 数据读取失败");} finally{setBbyBusy(false);}
   },[bbyStore,from,to,granularity,sku,getJson]);
   useEffect(()=>{if(tab!=="bby")return;const timer=window.setTimeout(()=>void refreshBby(),80);return()=>window.clearTimeout(timer);},[tab,refreshBby]);
 
-  async function syncBbyNow(){setBusy(true);setError("");try{let cursor=new Date(`${from}T00:00:00Z`),end=new Date(`${to}T00:00:00Z`);let orders=0,returned=0,windows=0;while(cursor<=end){const a=dateInput(cursor);setNotice(`Best Buy ${bbyStore} 同步中：${a}（每日安全窗口）`);let result:{orders:number;returns:number}|undefined;for(let attempt=1;attempt<=4;attempt++){try{result=await getJson<{orders:number;returns:number}>("/api/bby/sync",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({store:bbyStore,from:a,to:a})});break;}catch(cause){if(!(cause instanceof Error)||!cause.message.includes("429")||attempt===4)throw cause;setNotice(`Mirakl rate limit：${a} 将在 ${attempt*3} 秒后重试`);await new Promise(resolve=>setTimeout(resolve,attempt*3000));}}orders+=result?.orders||0;returned+=result?.returns||0;windows++;cursor.setUTCDate(cursor.getUTCDate()+1);}setNotice(`Best Buy ${bbyStore} 同步完成：${windows} 个窗口，${orders} 条销售行，${returned} 条退款行。`);await refreshBby();}catch(cause){setError(cause instanceof Error?cause.message:"Best Buy 同步失败");setBusy(false);}}
+  async function syncBbyNow(){setBbyBusy(true);setBbyError("");try{let cursor=new Date(`${from}T00:00:00Z`),end=new Date(`${to}T00:00:00Z`);let orders=0,returned=0,windows=0;while(cursor<=end){const a=dateInput(cursor);setBbyNotice(`Best Buy ${bbyStore} 同步中：${a}（每日安全窗口）`);let result:{orders:number;returns:number}|undefined;for(let attempt=1;attempt<=4;attempt++){try{result=await getJson<{orders:number;returns:number}>("/api/bby/sync",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({store:bbyStore,from:a,to:a})});break;}catch(cause){if(!(cause instanceof Error)||!cause.message.includes("429")||attempt===4)throw cause;setBbyNotice(`Mirakl rate limit：${a} 将在 ${attempt*3} 秒后重试`);await new Promise(resolve=>setTimeout(resolve,attempt*3000));}}orders+=result?.orders||0;returned+=result?.returns||0;windows++;cursor.setUTCDate(cursor.getUTCDate()+1);}setBbyNotice(`Best Buy ${bbyStore} 同步完成：${windows} 个窗口，${orders} 条销售行，${returned} 条退款行。`);await refreshBby();}catch(cause){setBbyError(cause instanceof Error?cause.message:"Best Buy 同步失败");setBbyBusy(false);}}
 
   async function upload(kind: string, event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]; event.target.value = ""; if (!file) return;
@@ -216,20 +222,23 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
     </aside>
 
     <section className="workspace">
-      <header className="topbar"><div><p className="crumb">SAPHIANT / COMMERCE INTELLIGENCE</p><h1>{nav.find((item) => item.key === tab)?.label}</h1></div><div className="top-status"><span className={sync.configured ? "live" : "pending"}>{sync.configured ? "TTS 数据在线" : "TTS API 待配置"}</span></div></header>
+      <header className="topbar"><div><p className="crumb">SAPHIANT / COMMERCE INTELLIGENCE</p><h1>{nav.find((item) => item.key === tab)?.label}</h1></div><div className="top-status">{tab==="tts"?<span className={sync.configured ? "live" : "pending"}>{sync.configured ? "TTS 数据在线" : "TTS API 待配置"}</span>:tab==="bby"?<span className={bbyBusy?"pending":"live"}>{bbyBusy?`BBY ${bbyStore} 同步中`:`BBY ${bbyStore} 数据库`}</span>:<span className="live">SAPHIANT BI</span>}</div></header>
       {tab === "tts" && <div className="subnav tts-subnav">{[
         ["pnl", "P&L Overview"], ["sales", "Sales & Orders"], ["marketing", "Marketing"], ["returns", "R&R"], ["costs", "Cost Inputs"], ["health", "Data Health"],
       ].map(([key, label]) => <button key={key} className={ttsTab === key ? "active" : ""} onClick={() => setTtsTab(key as TtsTab)}>{label}</button>)}</div>}
-      {tab === "bby" && <><div className="subnav tts-subnav"><button disabled>P&L · Next</button><button className="active">R&R</button><button onClick={()=>void syncBbyNow()} disabled={busy||!admin}>{busy?"Syncing…":`Sync ${bbyStore} Mirakl`}</button></div><GlobalFilters from={from} to={to} setFrom={setFrom} setTo={setTo} granularity={granularity} setGranularity={setGranularity} product={product} setProduct={setProduct} sku={sku} setSku={setSku} dimensions={bbyReturns.dimensions} returnsMode={false} returnType={returnType} setReturnType={setReturnType} returnStatus={returnStatus} setReturnStatus={setReturnStatus} busy={busy} refresh={refreshBby}/></>}
+      {tab === "bby" && <><div className="subnav tts-subnav"><button disabled>P&L · Next</button><button className="active">R&R</button><button onClick={()=>void syncBbyNow()} disabled={bbyBusy||!admin}>{bbyBusy?"Syncing…":`Sync ${bbyStore} Mirakl`}</button></div><GlobalFilters from={from} to={to} setFrom={setFrom} setTo={setTo} granularity={granularity} setGranularity={setGranularity} product={product} setProduct={setProduct} sku={sku} setSku={setSku} dimensions={bbyReturns.dimensions} returnsMode={false} returnType={returnType} setReturnType={setReturnType} returnStatus={returnStatus} setReturnStatus={setReturnStatus} busy={bbyBusy} refresh={refreshBby}/></>}
       {tab === "settings" && admin && <div className="subnav"><button className={settingsTab === "uploads" ? "active" : ""} onClick={() => setSettingsTab("uploads")}>数据上传</button><button className={settingsTab === "access" ? "active" : ""} onClick={() => setSettingsTab("access")}>访问管理</button></div>}
       {tab === "tts" && ttsTab !== "health" && ttsTab !== "costs" && <GlobalFilters from={from} to={to} setFrom={setFrom} setTo={setTo} granularity={granularity} setGranularity={setGranularity} product={product} setProduct={setProduct} sku={sku} setSku={setSku} dimensions={dimensions} returnsMode={ttsTab === "returns"} returnType={returnType} setReturnType={setReturnType} returnStatus={returnStatus} setReturnStatus={setReturnStatus} busy={busy} refresh={refresh} />}
-      {error && <div className="message error-message">{error}<button onClick={() => setError("")}>×</button></div>}
-      {notice && <div className="message success-message">{notice}<button onClick={() => setNotice("")}>×</button></div>}
+      {tab!=="bby" && error && <div className="message error-message">{error}<button onClick={() => setError("")}>×</button></div>}
+      {tab!=="bby" && notice && <div className="message success-message">{notice}<button onClick={() => setNotice("")}>×</button></div>}
+      {tab==="bby" && bbyError && <div className="message error-message">{bbyError}<button onClick={() => setBbyError("")}>×</button></div>}
+      {tab==="bby" && bbyNotice && <div className="message success-message">{bbyNotice}<button onClick={() => setBbyNotice("")}>×</button></div>}
 
-      {tab === "bby" && <ReturnsView key={`bby-${bbyStore}-${from}-${to}-${granularity}-${sku}`} data={bbyReturns} previous={emptyReturns} selectedSku={sku} onSkuSelect={setSku} platform={`Best Buy ${bbyStore} · Mirakl`} />}
+      {tab === "bby" && bbyBusy && !bbyReturns.skus.length && <div className="dashboard-skeleton"><i/><i/><i/><i/><i/><i/></div>}
+      {tab === "bby" && !bbyError && (!bbyBusy || bbyReturns.skus.length>0) && <ReturnsView key={`bby-${bbyStore}-${from}-${to}-${granularity}-${sku}`} data={bbyReturns} previous={emptyReturns} selectedSku={sku} onSkuSelect={setSku} platform={`Best Buy ${bbyStore} · Mirakl`} />}
       {tab === "walmart" && <PlatformView code="WMT" title="Walmart Intelligence" description="为 Walmart 订单、退货、广告和 SKU 经营表现预留统一分析入口。" />}
       {tab === "pricing" && <PlatformView code="PRICE" title="三平台价格核验" description="规划 Amazon、Walmart、Best Buy 的实时售价、基准价和异常提醒。" />}
-      {busy && !pnl.trend.length && <div className="dashboard-skeleton"><i/><i/><i/><i/><i/><i/></div>}
+      {tab==="tts" && busy && !pnl.trend.length && <div className="dashboard-skeleton"><i/><i/><i/><i/><i/><i/></div>}
       {tab === "tts" && ttsTab === "pnl" && <PnlView key={`${from}-${to}-${granularity}-${product}-${sku}`} data={pnl} previous={previousPnl} admin={admin} onOpenCosts={openCosts} onSkuSelect={setSku} />}
       {tab === "tts" && ttsTab === "returns" && <ReturnsView key={`${from}-${to}-${granularity}-${product}-${sku}`} data={returns} previous={previousReturns} selectedSku={sku} onSkuSelect={setSku} />}
       {tab === "tts" && ttsTab === "costs" && <UploadCenter busy={busy} onUpload={upload} onWorkbook={uploadWorkbook} embedded canUpload={admin} />}
