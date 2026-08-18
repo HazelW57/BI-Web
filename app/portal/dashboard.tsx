@@ -76,6 +76,7 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
   const [bbyNotice, setBbyNotice] = useState("");
   const [bbyError, setBbyError] = useState("");
   const bbyRequestId = useRef(0);
+  const bbyAbort = useRef<AbortController | null>(null);
   const [items, setItems] = useState(initialAllowed);
   const [newEmail, setNewEmail] = useState("");
 
@@ -110,9 +111,10 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
   useEffect(() => { const timer = window.setTimeout(() => { void refresh(); }, 80); return () => window.clearTimeout(timer); }, [refresh]);
 
   const refreshBby = useCallback(async () => {
+    bbyAbort.current?.abort(); const controller=new AbortController(); bbyAbort.current=controller;
     const requestId=++bbyRequestId.current; setBbyBusy(true); setBbyError("");
-    try { const query=new URLSearchParams({store:bbyStore,from,to,granularity,sku}); const data=await getJson<ReturnsData>(`/api/bby/returns?${query}`); if(requestId===bbyRequestId.current)setBbyReturns(data); }
-    catch(cause){if(requestId===bbyRequestId.current)setBbyError(cause instanceof Error?cause.message:"Best Buy 数据读取失败");} finally{if(requestId===bbyRequestId.current)setBbyBusy(false);}
+    try { const query=new URLSearchParams({store:bbyStore,from,to,granularity,sku}); const data=await getJson<ReturnsData>(`/api/bby/returns?${query}`,{signal:controller.signal}); if(requestId===bbyRequestId.current)setBbyReturns(data); }
+    catch(cause){if(cause instanceof DOMException&&cause.name==="AbortError")return;if(requestId===bbyRequestId.current)setBbyError(cause instanceof Error?cause.message:"Best Buy 数据读取失败");} finally{if(requestId===bbyRequestId.current)setBbyBusy(false);}
   },[bbyStore,from,to,granularity,sku,getJson]);
   useEffect(()=>{if(tab!=="bby")return;const timer=window.setTimeout(()=>void refreshBby(),80);return()=>window.clearTimeout(timer);},[tab,refreshBby]);
 
