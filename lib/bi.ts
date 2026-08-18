@@ -79,6 +79,7 @@ export type ReturnFact = {
   status: string;
   requestedAt: number;
 };
+type FinanceStatementFact = { statementTime: number; settlementAmount: number; revenueAmount: number; feeAmount: number; adjustmentAmount: number; shippingAmount: number };
 
 export type PnlRow = {
   key: string;
@@ -545,7 +546,7 @@ function filterSales(sales: SalesFact[], filters: SnapshotFilters) {
 export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = {}) {
   await ensureBiSchema(db);
   const range = periodBounds(filters.from, filters.to);
-  const [salesResult, legacyCosts, costsResult, expensesResult, agencyResult, shippingResult, manualResult, returnsResult] = await Promise.all([
+  const [salesResult, legacyCosts, costsResult, expensesResult, agencyResult, shippingResult, manualResult, returnsResult, statementsResult] = await Promise.all([
     db.prepare(`${salesQuery()} WHERE s.ordered_at >= ? AND s.ordered_at < ? ORDER BY s.ordered_at`).bind(range.start, range.end).all<SalesFact>(),
     db.prepare("SELECT sku, effective_from AS effectiveFrom, product_cost AS productCost FROM sku_costs ORDER BY effective_from").all<CostFact>(),
     db.prepare("SELECT seller_sku AS sku, product_name AS productName, unit_cost AS productCost, effective_from AS effectiveFrom, effective_to AS effectiveTo FROM product_cost_rules ORDER BY effective_from").all<CostFact>(),
@@ -556,6 +557,9 @@ export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = 
     db.prepare(`SELECT return_id AS returnId, order_id AS orderId, line_item_id AS lineItemId, sku, reason, return_type AS returnType,
       quantity, refund_amount AS refundAmount, status, requested_at AS requestedAt FROM return_lines r
       WHERE EXISTS (SELECT 1 FROM sales_lines s WHERE s.order_id=r.order_id AND s.ordered_at>=? AND s.ordered_at<?)`).bind(range.start, range.end).all<ReturnFact>(),
+    db.prepare(`SELECT statement_time AS statementTime,settlement_amount AS settlementAmount,revenue_amount AS revenueAmount,
+      fee_amount AS feeAmount,adjustment_amount AS adjustmentAmount,shipping_cost_amount AS shippingAmount
+      FROM finance_statements WHERE statement_time>=? AND statement_time<? ORDER BY statement_time`).bind(range.start, range.end).all<FinanceStatementFact>(),
   ]);
   const dimensions = {
     products: [...new Set(salesResult.results.map((line) => line.productName).filter(Boolean))].sort(),
@@ -575,11 +579,28 @@ export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = 
       contributionProfit: round(netRevenue - row.cogs), margin: netRevenue ? round(operatingProfit / netRevenue * 100) : 0 };
   };
   const financeMappedLines = filtered.filter((line) => line.settlementAmount !== null).length;
+  const useStatementSummary = (!filters.product || filters.product === "ALL") && (!filters.sku || filters.sku === "ALL") && statementsResult.results.length > 0;
   const financeCoverage = { mappedLines: financeMappedLines, totalLines: filtered.length,
     percent: filtered.length ? round(financeMappedLines / filtered.length * 100) : 0,
-    status: financeMappedLines === filtered.length ? "complete" : "incomplete" };
-  const reconciled = { total: strictFinance(calculated.total), trend: calculated.trend.map(strictFinance),
-    months: calculated.months.map(strictFinance), skus: calculated.skus.map(strictFinance) };
+    statementCount: statementsResult.results.length, settlementSummary: useStatementSummary,
+    status: financeMappedLines === filtered.length ? "complete" : useStatementSummary ? "statement-summary" : "incomplete" };
+  const applyStatements = (row: PnlRow, statements: FinanceStatementFact[]) => {
+    if (!statements.length) return strictFinance(row);
+    const settlement = statements.reduce((sum, item) => sum + item.settlementAmount, 0);
+    const revenue = statements.reduce((sum, item) => sum + item.revenueAmount, 0);
+    const fees = statements.reduce((sum, item) => sum + item.feeAmount, 0);
+    const shipping = statements.reduce((sum, item) => sum + item.shippingAmount, 0);
+    const adjustments = statements.reduce((sum, item) => sum + item.adjustmentAmount, 0);
+    const operatingProfit = settlement - row.cogs - row.adSpend - row.videoAgencyFees - row.liveAgencyFees - row.returnShippingCost - row.otherCosts;
+    return { ...row, netRevenue: round(settlement), revenue: round(settlement), settlement: round(settlement), financeFinal: round(settlement),
+      tiktokFees: round(Math.abs(fees)), sellerShippingCost: round(Math.abs(shipping)), adjustments: round(adjustments),
+      unmappedDifference: round(settlement - revenue - fees - shipping - adjustments), operatingProfit: round(operatingProfit),
+      contributionProfit: round(settlement - row.cogs), margin: settlement ? round(operatingProfit / settlement * 100) : 0 };
+  };
+  const statementBuckets = new Map<string, FinanceStatementFact[]>();
+  for (const statement of statementsResult.results) { const key = bucketString(statement.statementTime, normalizedGranularity(filters.granularity)); const items = statementBuckets.get(key) || []; items.push(statement); statementBuckets.set(key, items); }
+  const reconciled = { total: useStatementSummary ? applyStatements(calculated.total, statementsResult.results) : strictFinance(calculated.total), trend: calculated.trend.map((row) => useStatementSummary ? applyStatements(row, statementBuckets.get(row.key) || []) : strictFinance(row)),
+    months: calculated.months.map((row) => useStatementSummary ? applyStatements(row, statementBuckets.get(row.key) || []) : strictFinance(row)), skus: calculated.skus.map(strictFinance) };
   return { range: { from: range.from, to: range.to }, granularity: normalizedGranularity(filters.granularity), dimensions, ...calculated,
     ...reconciled, financeCoverage,
     sources: [

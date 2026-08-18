@@ -13,7 +13,7 @@ type PnlRow = {
 };
 type Source = { metric: string; source: string; status?: string };
 type Dimensions = { products: string[]; skus: string[]; returnTypes?: string[]; returnStatuses?: string[] };
-type PnlData = { range: { from: string; to: string }; granularity: string; dimensions: Dimensions; total: PnlRow; trend: PnlRow[]; months: PnlRow[]; skus: PnlRow[]; sources: Source[]; financeCoverage?: { mappedLines: number; totalLines: number; percent: number; status: string } };
+type PnlData = { range: { from: string; to: string }; granularity: string; dimensions: Dimensions; total: PnlRow; trend: PnlRow[]; months: PnlRow[]; skus: PnlRow[]; sources: Source[]; financeCoverage?: { mappedLines: number; totalLines: number; percent: number; statementCount: number; settlementSummary: boolean; status: string } };
 type Reason = { reason: string; count: number; share: number; refundAmount: number };
 type ReturnSku = {
   sku: string; productName: string; soldUnits: number; returnedUnits: number; returnRate: number; refundAmount: number;
@@ -237,7 +237,7 @@ function PnlView({ data, admin, onOpenCosts, onSkuSelect }: { data: PnlData; adm
       <Kpi label="OPERATING PROFIT" value={money.format(total.operatingProfit)} note="After all management costs" tone={total.operatingProfit < 0 ? "negative" : "positive"} source="Management P&L formula" />
       <Kpi label="OPERATING MARGIN" value={`${total.margin.toFixed(1)}%`} note="Operating Profit ÷ Net Revenue" tone={total.margin < 0 ? "negative" : "positive"} source="Calculated management metric" />
     </div>
-    {data.financeCoverage?.status !== "complete" && <div className="data-warning"><strong>Finance data incomplete</strong><span>{number.format(data.financeCoverage?.mappedLines || 0)} / {number.format(data.financeCoverage?.totalLines || 0)} sales lines mapped. Net Revenue, Cost and Profit only include reconciled Finance records.</span></div>}
+    {data.financeCoverage?.status !== "complete" && <div className="data-warning"><strong>Finance reconciliation status</strong><span>{data.financeCoverage?.settlementSummary ? `${number.format(data.financeCoverage.statementCount)} Finance statements included in total Net Revenue; ` : ""}{number.format(data.financeCoverage?.mappedLines || 0)} / {number.format(data.financeCoverage?.totalLines || 0)} sales lines have SKU-level Finance mapping. SKU profit/cost remains incomplete until transaction backfill finishes.</span></div>}
     <div className="cost-strip">{costMetrics.map(([label, value, source]) => <article key={label} title={`Source: ${source}`}><span>{label}<i>i</i></span><strong>{money.format(value)}</strong><small>{percentOf(value, total.gmv)}</small></article>)}</div>
 
     <div className="dashboard-grid excel-hero-grid">
