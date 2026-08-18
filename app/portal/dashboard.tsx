@@ -27,7 +27,9 @@ type ReturnsData = {
   returnsCreatedDuringPeriod: number; skus: ReturnSku[]; sources: Source[];
   totalSoldUnits?: number; sampleUnits?: number; commercialSoldUnits?: number;
   orderCount?: number;
+  commercialOrderCount?:number; excludedOrderCount?:number; excludedUnits?:number;
 };
+type BbyExclusion={orderId:string;note:string;submittedBy:string;createdAt:number};
 type SyncData = {
   configured: boolean;
   lastRun: null | { status: string; ordersUpserted: number; returnsUpserted: number; message: string; startedAt: number; completedAt: number | null };
@@ -67,7 +69,9 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
   const [returns, setReturns] = useState<ReturnsData>(emptyReturns);
   const [previousReturns, setPreviousReturns] = useState<ReturnsData>(emptyReturns);
   const [bbyStore, setBbyStore] = useState<"SAP" | "JS">("SAP");
+  const [bbyView,setBbyView]=useState<"returns"|"exclusions">("returns");
   const [bbyReturns, setBbyReturns] = useState<ReturnsData>(emptyReturns);
+  const [bbyExclusions,setBbyExclusions]=useState<BbyExclusion[]>([]);
   const [sync, setSync] = useState<SyncData>({ configured: false, lastRun: null });
   const [busy, setBusy] = useState(false);
   const [bbyBusy, setBbyBusy] = useState(false);
@@ -117,6 +121,11 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
     catch(cause){if(cause instanceof DOMException&&cause.name==="AbortError")return;if(requestId===bbyRequestId.current)setBbyError(cause instanceof Error?cause.message:"Best Buy 数据读取失败");} finally{if(requestId===bbyRequestId.current)setBbyBusy(false);}
   },[bbyStore,from,to,granularity,sku,getJson]);
   useEffect(()=>{if(tab!=="bby")return;const timer=window.setTimeout(()=>void refreshBby(),80);return()=>window.clearTimeout(timer);},[tab,refreshBby]);
+
+  const refreshBbyExclusions=useCallback(async()=>{try{const data=await getJson<{rows:BbyExclusion[]}>(`/api/bby/exclusions?store=${bbyStore}`);setBbyExclusions(data.rows);}catch(cause){setBbyError(cause instanceof Error?cause.message:"刷单记录读取失败");}},[bbyStore,getJson]);
+  useEffect(()=>{if(tab==="bby"&&bbyView==="exclusions")void refreshBbyExclusions();},[tab,bbyView,refreshBbyExclusions]);
+  async function submitBbyExclusions(orderIds:string[],note:string){setBbyBusy(true);setBbyError("");try{await getJson("/api/bby/exclusions",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({store:bbyStore,orderIds,note})});setBbyNotice(`已提交 ${orderIds.length} 个 ${bbyStore} 刷单订单；R&R 已按新口径重算。`);await Promise.all([refreshBbyExclusions(),refreshBby()]);}catch(cause){setBbyError(cause instanceof Error?cause.message:"提交失败");}finally{setBbyBusy(false);}}
+  async function deleteBbyExclusion(orderId:string){setBbyBusy(true);setBbyError("");try{await getJson("/api/bby/exclusions",{method:"DELETE",headers:{"content-type":"application/json"},body:JSON.stringify({store:bbyStore,orderId})});await Promise.all([refreshBbyExclusions(),refreshBby()]);setBbyNotice(`${orderId} 已删除，可重新提交。`);}catch(cause){setBbyError(cause instanceof Error?cause.message:"删除失败");}finally{setBbyBusy(false);}}
 
   async function syncBbyNow(){setBbyBusy(true);setBbyError("");try{let cursor=new Date(`${from}T00:00:00Z`),end=new Date(`${to}T00:00:00Z`);let orders=0,returned=0,windows=0;while(cursor<=end){const a=dateInput(cursor);setBbyNotice(`Best Buy ${bbyStore} 同步中：${a}（每日安全窗口）`);let result:{orders:number;returns:number}|undefined;for(let attempt=1;attempt<=4;attempt++){try{result=await getJson<{orders:number;returns:number}>("/api/bby/sync",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({store:bbyStore,from:a,to:a})});break;}catch(cause){if(!(cause instanceof Error)||!cause.message.includes("429")||attempt===4)throw cause;setBbyNotice(`Mirakl rate limit：${a} 将在 ${attempt*3} 秒后重试`);await new Promise(resolve=>setTimeout(resolve,attempt*3000));}}orders+=result?.orders||0;returned+=result?.returns||0;windows++;cursor.setUTCDate(cursor.getUTCDate()+1);}setBbyNotice(`Best Buy ${bbyStore} 同步完成：${windows} 个窗口，${orders} 条销售行，${returned} 条退款行。`);await refreshBby();}catch(cause){setBbyError(cause instanceof Error?cause.message:"Best Buy 同步失败");setBbyBusy(false);}}
 
@@ -230,7 +239,7 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
       {tab === "tts" && <div className="subnav tts-subnav">{[
         ["pnl", "P&L Overview"], ["sales", "Sales & Orders"], ["marketing", "Marketing"], ["returns", "R&R"], ["costs", "Cost Inputs"], ["health", "Data Health"],
       ].map(([key, label]) => <button key={key} className={ttsTab === key ? "active" : ""} onClick={() => setTtsTab(key as TtsTab)}>{label}</button>)}</div>}
-      {tab === "bby" && <><div className="subnav tts-subnav"><button disabled>P&L · Next</button><button className="active">R&R</button><button onClick={()=>void syncBbyNow()} disabled={bbyBusy||!admin}>{bbyBusy?"Syncing…":`Sync ${bbyStore} Mirakl`}</button></div><GlobalFilters from={from} to={to} setFrom={setFrom} setTo={setTo} granularity={granularity} setGranularity={setGranularity} product={product} setProduct={setProduct} sku={sku} setSku={setSku} dimensions={bbyReturns.dimensions} returnsMode={false} returnType={returnType} setReturnType={setReturnType} returnStatus={returnStatus} setReturnStatus={setReturnStatus} busy={bbyBusy} refresh={refreshBby}/></>}
+      {tab === "bby" && <><div className="subnav tts-subnav"><button disabled>P&L · Next</button><button className={bbyView==="returns"?"active":""} onClick={()=>setBbyView("returns")}>R&R</button><button className={bbyView==="exclusions"?"active":""} onClick={()=>setBbyView("exclusions")}>刷单提交</button><button onClick={()=>void syncBbyNow()} disabled={bbyBusy||!admin}>{bbyBusy?"Syncing…":`Sync ${bbyStore} Mirakl`}</button></div>{bbyView==="returns"&&<GlobalFilters from={from} to={to} setFrom={setFrom} setTo={setTo} granularity={granularity} setGranularity={setGranularity} product={product} setProduct={setProduct} sku={sku} setSku={setSku} dimensions={bbyReturns.dimensions} returnsMode={false} returnType={returnType} setReturnType={setReturnType} returnStatus={returnStatus} setReturnStatus={setReturnStatus} busy={bbyBusy} refresh={refreshBby}/>}</>}
       {tab === "settings" && admin && <div className="subnav"><button className={settingsTab === "uploads" ? "active" : ""} onClick={() => setSettingsTab("uploads")}>数据上传</button><button className={settingsTab === "access" ? "active" : ""} onClick={() => setSettingsTab("access")}>访问管理</button></div>}
       {tab === "tts" && ttsTab !== "health" && ttsTab !== "costs" && <GlobalFilters from={from} to={to} setFrom={setFrom} setTo={setTo} granularity={granularity} setGranularity={setGranularity} product={product} setProduct={setProduct} sku={sku} setSku={setSku} dimensions={dimensions} returnsMode={ttsTab === "returns"} returnType={returnType} setReturnType={setReturnType} returnStatus={returnStatus} setReturnStatus={setReturnStatus} busy={busy} refresh={refresh} />}
       {tab!=="bby" && error && <div className="message error-message">{error}<button onClick={() => setError("")}>×</button></div>}
@@ -238,8 +247,9 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
       {tab==="bby" && bbyError && <div className="message error-message">{bbyError}<button onClick={() => setBbyError("")}>×</button></div>}
       {tab==="bby" && bbyNotice && <div className="message success-message">{bbyNotice}<button onClick={() => setBbyNotice("")}>×</button></div>}
 
-      {tab === "bby" && bbyBusy && !bbyReturns.skus.length && <div className="dashboard-skeleton"><i/><i/><i/><i/><i/><i/></div>}
-      {tab === "bby" && !bbyError && (!bbyBusy || bbyReturns.skus.length>0) && <ReturnsView key={`bby-${bbyStore}-${from}-${to}-${granularity}-${sku}`} data={bbyReturns} previous={emptyReturns} selectedSku={sku} onSkuSelect={setSku} platform={`Best Buy ${bbyStore} · Mirakl`} />}
+      {tab === "bby" && bbyView==="returns" && bbyBusy && !bbyReturns.skus.length && <div className="dashboard-skeleton"><i/><i/><i/><i/><i/><i/></div>}
+      {tab === "bby" && bbyView==="returns" && !bbyError && (!bbyBusy || bbyReturns.skus.length>0) && <ReturnsView key={`bby-${bbyStore}-${from}-${to}-${granularity}-${sku}`} data={bbyReturns} previous={emptyReturns} selectedSku={sku} onSkuSelect={setSku} platform={`Best Buy ${bbyStore} · Mirakl`} />}
+      {tab === "bby" && bbyView==="exclusions" && <BbyExclusionView store={bbyStore} rows={bbyExclusions} busy={bbyBusy} onSubmit={submitBbyExclusions} onDelete={deleteBbyExclusion}/>}
       {tab === "walmart" && <PlatformView code="WMT" title="Walmart Intelligence" description="为 Walmart 订单、退货、广告和 SKU 经营表现预留统一分析入口。" />}
       {tab === "pricing" && <PlatformView code="PRICE" title="三平台价格核验" description="规划 Amazon、Walmart、Best Buy 的实时售价、基准价和异常提醒。" />}
       {tab==="tts" && busy && !pnl.trend.length && <div className="dashboard-skeleton"><i/><i/><i/><i/><i/><i/></div>}
@@ -427,15 +437,21 @@ function MarketingChart({ rows }: { rows: PnlRow[] }) {
   return <div className="marketing-chart">{rows.map((row) => { const costs = [row.adSpend, row.affiliateCommission, row.videoAgencyFees, row.liveAgencyFees]; const total = costs.reduce((a, b) => a + b, 0); return <div key={row.key} title={`${row.key}\nAd Spend ${preciseMoney.format(row.adSpend)}\nAffiliate ${preciseMoney.format(row.affiliateCommission)}\nVideo ${preciseMoney.format(row.videoAgencyFees)}\nLIVE ${preciseMoney.format(row.liveAgencyFees)}`}><div style={{ height: `${Math.max(5, total / max * 100)}%` }}>{costs.map((cost, index) => cost ? <i key={index} style={{ height: `${cost / total * 100}%`, background: palette[index + 3] }} /> : null)}</div><span>{row.key.slice(5)}</span></div>; })}</div>;
 }
 
+function BbyExclusionView({store,rows,busy,onSubmit,onDelete}:{store:"SAP"|"JS";rows:BbyExclusion[];busy:boolean;onSubmit:(ids:string[],note:string)=>Promise<void>;onDelete:(id:string)=>Promise<void>}){
+  const [raw,setRaw]=useState(""),[note,setNote]=useState("");
+  const ids=[...new Set(raw.split(/[\s,;]+/).map(value=>value.trim()).filter(Boolean))];
+  return <section className="panel bby-exclusions"><div className="section-head"><div><p className="kicker">BEST BUY {store} · EXCLUDED ORDER REGISTER</p><h2>刷单提交与历史记录</h2><small>提交后从真实订单、销量、R&R 及后续 P&L 收益/利润口径中排除。</small></div><span className="range-badge">{rows.length} orders excluded</span></div><div className="exclusion-form"><label>Order IDs<textarea value={raw} onChange={event=>setRaw(event.target.value)} placeholder="每行一个 order_id，也支持逗号或空格分隔"/></label><label>备注<input value={note} onChange={event=>setNote(event.target.value)} placeholder="例如：刷单批次、负责人、原因"/></label><button disabled={busy||!ids.length} onClick={async()=>{await onSubmit(ids,note);setRaw("");setNote("");}}>提交 {ids.length?`${ids.length} 个订单`:""}</button></div><div className="table-scroll"><table><thead><tr><th>Order ID</th><th>备注</th><th>提交人</th><th>提交时间</th><th>操作</th></tr></thead><tbody>{rows.map(row=><tr key={row.orderId}><td>{row.orderId}</td><td>{row.note||"—"}</td><td>{row.submittedBy}</td><td>{new Date(row.createdAt).toLocaleString()}</td><td><button className="delete-row" disabled={busy} onClick={()=>void onDelete(row.orderId)}>删除</button></td></tr>)}{!rows.length&&<tr><td colSpan={5}>暂无提交记录</td></tr>}</tbody></table></div></section>;
+}
+
 function ReturnsView({ data, previous, selectedSku, onSkuSelect, platform = "TikTok" }: { data: ReturnsData; previous: ReturnsData; selectedSku: string; onSkuSelect: (sku: string) => void; platform?: string }) {
   const selected = selectedSku !== "ALL" ? data.skus.find((row) => row.sku === selectedSku) : undefined;
   return <>
     <div className={`kpi-grid returns-kpis${data.orderCount !== undefined ? " bby-kpis" : ""}`}>
       {data.orderCount !== undefined && <Kpi label="ORDERS" value={number.format(data.orderCount)} current={data.orderCount} previous={previous.orderCount || 0} note="Distinct valid Mirakl order IDs" source={`${platform} Orders API`} status="Actual" />}
       <Kpi label="SOLD UNITS" value={number.format(data.totalSoldUnits ?? data.soldUnits)} current={data.totalSoldUnits ?? data.soldUnits} previous={previous.totalSoldUnits ?? previous.soldUnits} note="All valid sold units, including samples" source={`${platform} Orders API`} status="Actual" />
-      <Kpi label="SOLD UNITS · EXCL. SAMPLES" value={number.format(data.commercialSoldUnits ?? data.soldUnits)} current={data.commercialSoldUnits ?? data.soldUnits} previous={previous.commercialSoldUnits ?? previous.soldUnits} note={`${number.format(data.sampleUnits || 0)} sample units excluded`} source={`${platform} order type`} status="Actual" />
+      {data.excludedOrderCount!==undefined?<Kpi label="ORDERS · EXCL. 刷单" value={number.format(data.commercialOrderCount||0)} current={data.commercialOrderCount||0} previous={previous.commercialOrderCount||0} note={`${number.format(data.excludedOrderCount)} orders / ${number.format(data.excludedUnits||0)} units excluded`} source={`${platform} excluded-order register`} status="Actual" />:<Kpi label="SOLD UNITS · EXCL. SAMPLES" value={number.format(data.commercialSoldUnits ?? data.soldUnits)} current={data.commercialSoldUnits ?? data.soldUnits} previous={previous.commercialSoldUnits ?? previous.soldUnits} note={`${number.format(data.sampleUnits || 0)} sample units excluded`} source={`${platform} order type`} status="Actual" />}
       <Kpi label="RETURNED UNITS" value={number.format(data.returnedUnits)} current={data.returnedUnits} previous={previous.returnedUnits} note="Completed physical returns only" source="Returns API; rejected/canceled/pending excluded" status="Actual" />
-      <Kpi label="OVERALL RETURN RATE" value={`${data.returnRate.toFixed(2)}%`} current={data.returnRate} previous={previous.returnRate} note="Non-sample Returned Units ÷ Non-sample Sold Units" tone={data.returnRate > 10 ? "negative" : ""} source="Commercial sales cohort; samples excluded" status="Actual" />
+      <Kpi label="OVERALL RETURN RATE" value={`${data.returnRate.toFixed(2)}%`} current={data.returnRate} previous={previous.returnRate} note={data.excludedOrderCount!==undefined?"Returned Units ÷ Sold Units after excluded orders":"Non-sample Returned Units ÷ Non-sample Sold Units"} tone={data.returnRate > 10 ? "negative" : ""} source={data.excludedOrderCount!==undefined?"Commercial sales cohort; submitted orders excluded":"Commercial sales cohort; samples excluded"} status="Actual" />
       <Kpi label="REFUND GMV RATE" value={`${data.refundGmvRate.toFixed(2)}%`} current={data.refundGmvRate} previous={previous.refundGmvRate} note={money.format(data.refundAmount)} source="TikTok Returns / Finance API" status="Actual" />
       <Kpi label="RETURNS CREATED" value={number.format(data.returnsCreatedDuringPeriod)} current={data.returnsCreatedDuringPeriod} previous={previous.returnsCreatedDuringPeriod} note="Created in selected period" source="Returns API event date" status="Actual" />
       <Kpi label="HIGHEST-RISK SKU" value={riskSku(data.skus)?.sku || "—"} note={riskSku(data.skus) ? `${riskSku(data.skus)!.returnedUnits} returns / ${riskSku(data.skus)!.soldUnits} sold` : "No completed returns"} tone="negative" source="Volume-adjusted risk score" status="Actual" />
