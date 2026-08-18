@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import readXlsxFile from "read-excel-file/browser";
 
 type Allowed = { email: string; role: string; createdAt: number };
@@ -26,6 +26,7 @@ type ReturnsData = {
   returnRate: number; refundAmount: number; refundGmvRate: number; returnShippingCost: number; skuCount: number;
   returnsCreatedDuringPeriod: number; skus: ReturnSku[]; sources: Source[];
   totalSoldUnits?: number; sampleUnits?: number; commercialSoldUnits?: number;
+  orderCount?: number;
 };
 type SyncData = {
   configured: boolean;
@@ -74,11 +75,12 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
   const [error, setError] = useState("");
   const [bbyNotice, setBbyNotice] = useState("");
   const [bbyError, setBbyError] = useState("");
+  const bbyRequestId = useRef(0);
   const [items, setItems] = useState(initialAllowed);
   const [newEmail, setNewEmail] = useState("");
 
   const getJson = useCallback(async <T,>(url: string, init?: RequestInit) => {
-    const response = await fetch(url, init);
+    const response = await fetch(url, { cache: "no-store", ...init });
     const text = await response.text();
     let payload: T & { error?: string };
     try { payload = (text ? JSON.parse(text) : {}) as T & { error?: string }; }
@@ -108,9 +110,9 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
   useEffect(() => { const timer = window.setTimeout(() => { void refresh(); }, 80); return () => window.clearTimeout(timer); }, [refresh]);
 
   const refreshBby = useCallback(async () => {
-    setBbyBusy(true); setBbyError("");
-    try { const query=new URLSearchParams({store:bbyStore,from,to,granularity,sku}); setBbyReturns(await getJson<ReturnsData>(`/api/bby/returns?${query}`)); }
-    catch(cause){setBbyError(cause instanceof Error?cause.message:"Best Buy 数据读取失败");} finally{setBbyBusy(false);}
+    const requestId=++bbyRequestId.current; setBbyBusy(true); setBbyError("");
+    try { const query=new URLSearchParams({store:bbyStore,from,to,granularity,sku}); const data=await getJson<ReturnsData>(`/api/bby/returns?${query}`); if(requestId===bbyRequestId.current)setBbyReturns(data); }
+    catch(cause){if(requestId===bbyRequestId.current)setBbyError(cause instanceof Error?cause.message:"Best Buy 数据读取失败");} finally{if(requestId===bbyRequestId.current)setBbyBusy(false);}
   },[bbyStore,from,to,granularity,sku,getJson]);
   useEffect(()=>{if(tab!=="bby")return;const timer=window.setTimeout(()=>void refreshBby(),80);return()=>window.clearTimeout(timer);},[tab,refreshBby]);
 
@@ -427,8 +429,9 @@ function ReturnsView({ data, previous, selectedSku, onSkuSelect, platform = "Tik
   const selected = selectedSku !== "ALL" ? data.skus.find((row) => row.sku === selectedSku) : undefined;
   return <>
     <div className="kpi-grid returns-kpis">
+      {data.orderCount !== undefined && <Kpi label="ORDERS" value={number.format(data.orderCount)} current={data.orderCount} previous={previous.orderCount || 0} note="Distinct valid Mirakl order IDs" source={`${platform} Orders API`} status="Actual" />}
       <Kpi label="SOLD UNITS" value={number.format(data.totalSoldUnits ?? data.soldUnits)} current={data.totalSoldUnits ?? data.soldUnits} previous={previous.totalSoldUnits ?? previous.soldUnits} note="All valid sold units, including samples" source={`${platform} Orders API`} status="Actual" />
-      <Kpi label="SOLD UNITS · EXCL. SAMPLES" value={number.format(data.commercialSoldUnits ?? data.soldUnits)} current={data.commercialSoldUnits ?? data.soldUnits} previous={previous.commercialSoldUnits ?? previous.soldUnits} note={`${number.format(data.sampleUnits || 0)} sample units excluded`} source="TikTok Orders API order type" status="Actual" />
+      <Kpi label="SOLD UNITS · EXCL. SAMPLES" value={number.format(data.commercialSoldUnits ?? data.soldUnits)} current={data.commercialSoldUnits ?? data.soldUnits} previous={previous.commercialSoldUnits ?? previous.soldUnits} note={`${number.format(data.sampleUnits || 0)} sample units excluded`} source={`${platform} order type`} status="Actual" />
       <Kpi label="RETURNED UNITS" value={number.format(data.returnedUnits)} current={data.returnedUnits} previous={previous.returnedUnits} note="Completed physical returns only" source="Returns API; rejected/canceled/pending excluded" status="Actual" />
       <Kpi label="OVERALL RETURN RATE" value={`${data.returnRate.toFixed(2)}%`} current={data.returnRate} previous={previous.returnRate} note="Non-sample Returned Units ÷ Non-sample Sold Units" tone={data.returnRate > 10 ? "negative" : ""} source="Commercial sales cohort; samples excluded" status="Actual" />
       <Kpi label="REFUND GMV RATE" value={`${data.refundGmvRate.toFixed(2)}%`} current={data.refundGmvRate} previous={previous.refundGmvRate} note={money.format(data.refundAmount)} source="TikTok Returns / Finance API" status="Actual" />
