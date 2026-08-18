@@ -149,13 +149,13 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
   }
 
   async function backfillAffiliateNow() {
-    setBusy(true); setError(""); setNotice("Affiliate 历史回填已开始：按月拉取 attribution，并用 Finance API 核对实际佣金。");
+    setBusy(true); setError(""); setNotice("Affiliate 历史回填已开始：按 3 天安全窗口分页拉取 attribution，并用 Finance API 核对实际佣金。");
     try {
       const start = new Date("2026-02-01T00:00:00Z");
       const end = new Date(); end.setUTCDate(end.getUTCDate() + 1); end.setUTCHours(0, 0, 0, 0);
       let cursor = start; let attributions = 0; let finalRows = 0; let pendingOrders = 0; let windows = 0;
       while (cursor < end) {
-        let next = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
+        let next = new Date(cursor); next.setUTCDate(next.getUTCDate() + 3);
         if (next > end) next = end;
         const from = cursor.toISOString().slice(0, 10); const to = next.toISOString().slice(0, 10);
         setNotice(`Affiliate 回填中：${from} → ${to}（第 ${windows + 1} 个时间窗）`);
