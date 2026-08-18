@@ -204,6 +204,18 @@ const BI_SCHEMA = [
     id TEXT PRIMARY KEY, order_id TEXT NOT NULL, sku TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL,
     content_type TEXT NOT NULL DEFAULT '', raw_json TEXT NOT NULL, updated_at INTEGER NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS affiliate_attributions (
+    id TEXT PRIMARY KEY, order_id TEXT NOT NULL, sku_id TEXT NOT NULL DEFAULT '', sku TEXT NOT NULL DEFAULT '',
+    attributed_at INTEGER NOT NULL, content_type TEXT NOT NULL DEFAULT '', creator_id TEXT NOT NULL DEFAULT '',
+    raw_json TEXT NOT NULL, updated_at INTEGER NOT NULL
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_affiliate_attribution_order_sku ON affiliate_attributions(order_id,sku_id)`,
+  `CREATE TABLE IF NOT EXISTS affiliate_commissions (
+    id TEXT PRIMARY KEY, order_id TEXT NOT NULL, sku_id TEXT NOT NULL DEFAULT '', sku TEXT NOT NULL DEFAULT '',
+    amount REAL, currency TEXT NOT NULL DEFAULT 'USD', status TEXT NOT NULL,
+    attribution_id TEXT NOT NULL DEFAULT '', finance_transaction_id TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_affiliate_commission_order_sku ON affiliate_commissions(order_id,sku_id)`,
   `CREATE TABLE IF NOT EXISTS sync_windows (
     id TEXT PRIMARY KEY, source TEXT NOT NULL, window_start TEXT NOT NULL, window_end TEXT NOT NULL,
     status TEXT NOT NULL, item_count INTEGER NOT NULL DEFAULT 0, page_count INTEGER NOT NULL DEFAULT 0,
@@ -232,6 +244,8 @@ export async function ensureBiSchema(db: D1Database) {
     db.prepare("UPDATE sales_lines SET sku=? WHERE sku=?").bind(target, source),
     db.prepare("UPDATE return_lines SET sku=? WHERE sku=?").bind(target, source),
     db.prepare("UPDATE affiliate_orders SET sku=? WHERE sku=?").bind(target, source),
+    db.prepare("UPDATE affiliate_attributions SET sku=? WHERE sku=?").bind(target, source),
+    db.prepare("UPDATE affiliate_commissions SET sku=? WHERE sku=?").bind(target, source),
   ]));
 }
 
@@ -566,7 +580,7 @@ function filterSales(sales: SalesFact[], filters: SnapshotFilters) {
 export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = {}) {
   await ensureBiSchema(db);
   const range = periodBounds(filters.from, filters.to);
-  const [salesResult, legacyCosts, costsResult, expensesResult, agencyResult, shippingResult, manualResult, returnsResult, statementsResult] = await Promise.all([
+  const [salesResult, legacyCosts, costsResult, expensesResult, agencyResult, shippingResult, manualResult, returnsResult, statementsResult, affiliateResult] = await Promise.all([
     db.prepare(`${salesQuery()} WHERE s.ordered_at >= ? AND s.ordered_at < ? ORDER BY s.ordered_at`).bind(range.start, range.end).all<SalesFact>(),
     db.prepare("SELECT sku, effective_from AS effectiveFrom, product_cost AS productCost FROM sku_costs ORDER BY effective_from").all<CostFact>(),
     db.prepare("SELECT seller_sku AS sku, product_name AS productName, unit_cost AS productCost, effective_from AS effectiveFrom, effective_to AS effectiveTo FROM product_cost_rules ORDER BY effective_from").all<CostFact>(),
@@ -580,6 +594,9 @@ export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = 
     db.prepare(`SELECT statement_time AS statementTime,settlement_amount AS settlementAmount,revenue_amount AS revenueAmount,
       fee_amount AS feeAmount,adjustment_amount AS adjustmentAmount,shipping_cost_amount AS shippingAmount
       FROM finance_statements WHERE statement_time>=? AND statement_time<? ORDER BY statement_time`).bind(range.start, range.end).all<FinanceStatementFact>(),
+    db.prepare(`SELECT ac.order_id AS orderId,ac.sku,ac.amount,ac.status FROM affiliate_commissions ac
+      WHERE EXISTS (SELECT 1 FROM sales_lines s WHERE s.order_id=ac.order_id AND s.ordered_at>=? AND s.ordered_at<?)`)
+      .bind(range.start,range.end).all<{orderId:string;sku:string;amount:number|null;status:string}>(),
   ]);
   const dimensions = {
     products: [...new Set(salesResult.results.map((line) => line.productName).filter(Boolean))].sort(),
@@ -605,6 +622,15 @@ export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = 
     percent: financeEligible.length ? round(financeMappedLines / financeEligible.length * 100) : 0,
     statementCount: statementsResult.results.length, settlementSummary: useStatementSummary,
     status: financeMappedLines === filtered.length ? "complete" : useStatementSummary ? "statement-summary" : "incomplete" };
+  const affiliateOrders = new Set(affiliateResult.results.map(row=>row.orderId));
+  const affiliateRows = affiliateResult.results.filter(row=>(!filters.sku||filters.sku==="ALL"||row.sku===filters.sku));
+  const affiliateFinal = affiliateRows.filter(row=>row.status==="FINAL"&&row.amount!==null);
+  const affiliateEstimated = affiliateRows.filter(row=>row.status==="ESTIMATED"&&row.amount!==null);
+  const affiliateCoverage = { attributedOrders: affiliateOrders.size, mappedRows: affiliateRows.filter(row=>row.amount!==null).length,
+    totalRows: affiliateRows.length, finalRows: affiliateFinal.length, estimatedRows: affiliateEstimated.length,
+    finalAmount: round(affiliateFinal.reduce((sum,row)=>sum+Math.abs(row.amount||0),0)), estimatedAmount: round(affiliateEstimated.reduce((sum,row)=>sum+Math.abs(row.amount||0),0)),
+    percent: affiliateRows.length?round(affiliateRows.filter(row=>row.amount!==null).length/affiliateRows.length*100):0,
+    status: !affiliateRows.length?"not-mapped":affiliateRows.every(row=>row.status==="FINAL"&&row.amount!==null)?"final":affiliateRows.some(row=>row.amount!==null)?"partial":"pending" };
   const applyStatements = (row: PnlRow, statements: FinanceStatementFact[]) => {
     if (!statements.length) return strictFinance(row);
     const settlement = statements.reduce((sum, item) => sum + item.settlementAmount, 0);
@@ -628,7 +654,7 @@ export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = 
     returnedOrders: new Set(returnsResult.results.filter(item => completedReturn(item.status)).map(item => item.orderId).filter(Boolean)).size,
     commercialUnits: commercialLines.reduce((sum,line)=>sum+line.quantity,0), sampleUnits: sampleLines.reduce((sum,line)=>sum+line.quantity,0) };
   return { range: { from: range.from, to: range.to }, granularity: normalizedGranularity(filters.granularity), dimensions, ...calculated,
-    ...reconciled, financeCoverage, orderMix,
+    ...reconciled, financeCoverage, affiliateCoverage, orderMix,
     sources: [
       { metric: "GMV / Orders / Units", source: "TikTok Orders API", status: "actual" },
       { metric: "Refunds / TikTok Fees / Shipping / Affiliate", source: "TikTok Finance API", status: "actual-or-pending" },
@@ -680,6 +706,10 @@ export async function getSyncStatus(env: BiEnv) {
     (SELECT COUNT(*) FROM agency_fee_rules) AS agencyRules,
     (SELECT COUNT(*) FROM return_shipping_rules) AS returnShippingRules,
     (SELECT COUNT(*) FROM manual_costs) AS manualCosts,
+    (SELECT COUNT(*) FROM affiliate_attributions) AS affiliateAttributions,
+    (SELECT COUNT(*) FROM affiliate_commissions WHERE amount IS NOT NULL) AS affiliateMapped,
+    (SELECT COUNT(*) FROM affiliate_commissions WHERE status='FINAL') AS affiliateFinal,
+    (SELECT COUNT(*) FROM affiliate_commissions WHERE status='ESTIMATED') AS affiliateEstimated,
     (SELECT COUNT(DISTINCT order_id) FROM finance_transactions) AS financeOrders,
     (SELECT COUNT(DISTINCT order_id) FROM sales_lines WHERE order_status NOT LIKE '%CANCEL%' AND order_status NOT LIKE '%UNPAID%') AS validOrders`).first();
   return {

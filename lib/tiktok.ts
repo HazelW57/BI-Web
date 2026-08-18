@@ -250,6 +250,59 @@ function leafAmounts(value: unknown, prefix = "", output: { path: string; amount
   return output;
 }
 
+async function upsertAffiliateAttribution(env: BiEnv, record: JsonRecord) {
+  const orderId = stringValue(record.order_id, record.id); if (!orderId) return 0;
+  const items = asArray(record.skus ?? record.products ?? record.items ?? record.order_lines).map(asRecord);
+  const rows = items.length ? items : [record]; let count = 0;
+  for (const item of rows) {
+    const skuId = stringValue(item.sku_id, item.product_id, item.id, record.sku_id, record.product_id);
+    const saleLines = await env.DB.prepare("SELECT id,sku,raw_json AS rawJson FROM sales_lines WHERE order_id=?").bind(orderId).all<{id:string;sku:string;rawJson:string}>();
+    const matched = saleLines.results.find(line=>{try{const raw=JSON.parse(line.rawJson||"{}"); const source=stringValue(raw?.line?.sku_id,raw?.line?.seller_sku,raw?.line?.product_id);return source===skuId||line.sku===mappedSku(skuId);}catch{return line.sku===mappedSku(skuId);}}) || (saleLines.results.length===1?saleLines.results[0]:undefined);
+    const sku = matched?.sku || mappedSku(skuId) || "UNKNOWN-SKU";
+    const attributionId = `${orderId}:${skuId||sku}`; const now=Date.now();
+    await env.DB.prepare(`INSERT INTO affiliate_attributions(id,order_id,sku_id,sku,attributed_at,content_type,creator_id,raw_json,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sku=excluded.sku,attributed_at=excluded.attributed_at,content_type=excluded.content_type,
+      creator_id=excluded.creator_id,raw_json=excluded.raw_json,updated_at=excluded.updated_at`)
+      .bind(attributionId,orderId,skuId,sku,timestampValue(record.create_time??record.pay_time??record.created_at),stringValue(record.content_type,item.content_type),stringValue(record.creator_id,record.creator_user_id),JSON.stringify({record,item}),now).run();
+    const estimate=Math.abs(firstNamedAmount(item,/estimated.*commission.*amount|commission.*amount/i)||firstNamedAmount(record,/estimated.*commission.*amount|commission.*amount/i));
+    await env.DB.prepare(`INSERT INTO affiliate_commissions(id,order_id,sku_id,sku,amount,currency,status,attribution_id,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sku=excluded.sku,
+      amount=CASE WHEN affiliate_commissions.status='FINAL' THEN affiliate_commissions.amount ELSE excluded.amount END,
+      status=CASE WHEN affiliate_commissions.status='FINAL' THEN 'FINAL' ELSE excluded.status END,attribution_id=excluded.attribution_id,updated_at=excluded.updated_at`)
+      .bind(attributionId,orderId,skuId,sku,estimate||null,stringValue(item.currency,record.currency)||"USD",estimate?"ESTIMATED":"PENDING",attributionId,now).run();
+    if(matched&&estimate) await env.DB.prepare("UPDATE sales_lines SET affiliate_commission=CASE WHEN affiliate_commission=0 THEN ? ELSE affiliate_commission END,updated_at=? WHERE id=?").bind(estimate,now,matched.id).run();
+    count+=1;
+  }
+  return count;
+}
+
+export async function syncAffiliateWindow(env: BiEnv, from: string, to: string) {
+  await ensureBiSchema(env.DB); validateConfig(env);
+  const fromSeconds=Math.floor(Date.parse(`${from}T00:00:00Z`)/1000),toSeconds=Math.floor(Date.parse(`${to}T00:00:00Z`)/1000);
+  if(!Number.isFinite(fromSeconds)||!Number.isFinite(toSeconds)||fromSeconds>=toSeconds) throw new Error("Invalid affiliate window");
+  const path="/affiliate_seller/202410/orders/search"; let pageToken="",pages=0,items=0; const seen=new Set<string>();
+  for(let page=0;page<500;page+=1){
+    const data=await tiktokRequest(env,path,{method:"POST",query:{page_size:"100",...(pageToken?{page_token:pageToken}:{})},body:{create_time_ge:fromSeconds,create_time_lt:toSeconds}});
+    const orders=asArray(data.orders??data.affiliate_orders).map(asRecord); pages+=1;
+    for(const order of orders) items+=await upsertAffiliateAttribution(env,order);
+    pageToken=stringValue(data.next_page_token,data.nextPageToken); if(!pageToken) break;
+    if(seen.has(pageToken)) throw new Error("Affiliate Seller API returned a repeated page token"); seen.add(pageToken);
+  }
+  const orderIds=await env.DB.prepare(`SELECT DISTINCT order_id AS orderId FROM affiliate_attributions WHERE attributed_at>=? AND attributed_at<?`).bind(fromSeconds*1000,toSeconds*1000).all<{orderId:string}>();
+  let final=0,financePending=0;
+  for(const {orderId} of orderIds.results){try{final+=await applyFinance(env,orderId,"FINAL");}catch{financePending+=1;}}
+  await env.DB.prepare(`INSERT INTO sync_windows(id,source,window_start,window_end,status,item_count,page_count,message,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,item_count=excluded.item_count,page_count=excluded.page_count,message=excluded.message,updated_at=excluded.updated_at`)
+    .bind(`affiliate:${from}:${to}`,"affiliate",from,to,"success",items,pages,`${final} finance rows final; ${financePending} orders pending`,Date.now()).run();
+  return {from,to,pages,attributions:items,financeRowsFinal:final,financeOrdersPending:financePending};
+}
+
+export async function backfillAffiliate(env: BiEnv, from="2026-02-01", to=new Date().toISOString().slice(0,10)) {
+  const results=[]; let cursor=new Date(`${from}T00:00:00Z`),end=new Date(`${to}T00:00:00Z`);
+  while(cursor<end){let next=new Date(Date.UTC(cursor.getUTCFullYear(),cursor.getUTCMonth()+1,1));if(next>end)next=end;results.push(await syncAffiliateWindow(env,cursor.toISOString().slice(0,10),next.toISOString().slice(0,10)));cursor=next;}
+  return {from,to,windows:results.length,attributions:results.reduce((s,r)=>s+r.attributions,0),financeRowsFinal:results.reduce((s,r)=>s+r.financeRowsFinal,0),financeOrdersPending:results.reduce((s,r)=>s+r.financeOrdersPending,0),results};
+}
+
 async function applyFinance(env: BiEnv, orderId: string, financeStatus: "FINAL" | "ESTIMATED" = "FINAL") {
   const version = env.TIKTOK_FINANCE_API_VERSION || "202501";
   const path = `/finance/${version}/orders/${encodeURIComponent(orderId)}/statement_transactions`;
@@ -257,7 +310,7 @@ async function applyFinance(env: BiEnv, orderId: string, financeStatus: "FINAL" 
   const transactions = asArray(data.sku_transactions ?? data.transactions).map(asRecord);
   let applied = 0;
   for (const transaction of transactions) {
-    const sku = mappedSku(stringValue(transaction.seller_sku, transaction.sku_id, transaction.sku_name));
+    const sourceSkuId=stringValue(transaction.sku_id,transaction.seller_sku,transaction.sku_name); const sku = mappedSku(sourceSkuId);
     const lineId = stringValue(transaction.order_line_item_id, transaction.line_item_id);
     const row = lineId
       ? await env.DB.prepare("SELECT id FROM sales_lines WHERE order_id = ? AND line_item_id = ? LIMIT 1").bind(orderId, lineId).first<{ id: string }>()
@@ -269,16 +322,23 @@ async function applyFinance(env: BiEnv, orderId: string, financeStatus: "FINAL" 
     const settlement = numberValue(transaction.settlement_amount, 0);
     const adjustment = numberValue(transaction.adjustment_amount, 0);
     const unmapped = settlement - (revenue + numberValue(transaction.fee_and_tax_amount ?? transaction.fee_tax_amount, 0) + numberValue(transaction.shipping_cost_amount, 0) + adjustment);
-    const affiliate = Math.abs(firstNamedAmount(transaction, /affiliate.*commission.*amount/i));
-    const fee = Math.max(0, feeAndTax - affiliate);
+    const affiliateLeaf=leafAmounts(transaction).find(item=>/affiliate.*commission.*amount/i.test(item.path));
+    const affiliate = affiliateLeaf ? Math.abs(affiliateLeaf.amount) : null;
+    const fee = Math.max(0, feeAndTax - (affiliate || 0));
     const refund = Math.abs(firstNamedAmount(transaction, /gross.*sales.*refund.*amount|refund.*amount/i));
     const returnShipping = Math.abs(firstNamedAmount(transaction, /return.*shipping.*amount|shipping.*return.*amount/i));
     await env.DB.prepare(`UPDATE sales_lines SET financial_net_sales=?, platform_fee=?, affiliate_commission=?,
       shipping_cost=?, settlement_amount=?, refund_amount=MAX(refund_amount, ?), updated_at=? WHERE id=?`)
-      .bind(revenue, fee, affiliate, shipping, settlement, refund, Date.now(), row.id).run();
+      .bind(revenue, fee, affiliate || 0, shipping, settlement, refund, Date.now(), row.id).run();
     await env.DB.prepare(`INSERT INTO finance_line_costs (sales_line_id,return_shipping_actual,updated_at) VALUES (?,?,?)
       ON CONFLICT(sales_line_id) DO UPDATE SET return_shipping_actual=excluded.return_shipping_actual,updated_at=excluded.updated_at`)
       .bind(row.id, returnShipping, Date.now()).run();
+    const attribution=await env.DB.prepare("SELECT id,sku_id AS skuId FROM affiliate_attributions WHERE order_id=? AND sku=? LIMIT 1").bind(orderId,sku).first<{id:string;skuId:string}>();
+    const affiliateId=attribution?.id||`${orderId}:${sourceSkuId||sku}`;
+    await env.DB.prepare(`INSERT INTO affiliate_commissions(id,order_id,sku_id,sku,amount,currency,status,finance_transaction_id,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sku=excluded.sku,amount=excluded.amount,status=excluded.status,
+      finance_transaction_id=excluded.finance_transaction_id,updated_at=excluded.updated_at`)
+      .bind(affiliateId,orderId,attribution?.skuId||sourceSkuId,sku,affiliate,stringValue(transaction.currency)||"USD",affiliate===null?"PENDING":financeStatus,stringValue(transaction.id,transaction.transaction_id),Date.now()).run();
     const transactionId = stringValue(transaction.id, transaction.transaction_id) || `${orderId}:${lineId || sku || "order"}`;
     await env.DB.prepare(`INSERT INTO raw_finance_transactions (id,order_id,line_item_id,sku,raw_json,updated_at) VALUES (?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET raw_json=excluded.raw_json,updated_at=excluded.updated_at`)
@@ -376,6 +436,9 @@ export async function syncTikTok(env: BiEnv, days = 7) {
     const ordersUpserted = await upsertOrders(env, orders);
     const returns = await fetchReturns(env, fromSeconds, toSeconds);
     const returnsUpserted = await upsertReturns(env, returns);
+    const fromDate=new Date(fromSeconds*1000).toISOString().slice(0,10),toDate=new Date(toSeconds*1000).toISOString().slice(0,10);
+    let affiliateAttributions=0,affiliateWarning="";
+    try{affiliateAttributions=(await syncAffiliateWindow(env,fromDate,toDate)).attributions;}catch(error){affiliateWarning=error instanceof Error?error.message:"Affiliate sync failed";}
     const pendingFinance = await env.DB.prepare(`SELECT DISTINCT order_id AS orderId FROM sales_lines
       WHERE financial_net_sales IS NULL ORDER BY ordered_at DESC LIMIT 5`).all<{ orderId: string }>();
     let financeWarnings = 0;
@@ -383,7 +446,7 @@ export async function syncTikTok(env: BiEnv, days = 7) {
       try { await applyFinance(env, orderId); }
       catch { financeWarnings += 1; }
     }
-    const message = `Synced ${orders.length} orders and ${returns.length} returns${financeWarnings ? `; ${financeWarnings} finance records pending` : ""}`;
+    const message = `Synced ${orders.length} orders, ${returns.length} returns and ${affiliateAttributions} affiliate attributions${financeWarnings ? `; ${financeWarnings} finance records pending` : ""}${affiliateWarning?`; Affiliate: ${affiliateWarning}`:""}`;
     await env.DB.prepare(`UPDATE sync_runs SET status='success', orders_upserted=?, returns_upserted=?,
       message=?, completed_at=? WHERE id=?`).bind(ordersUpserted, returnsUpserted, message, Date.now(), id).run();
     return { id, ordersUpserted, returnsUpserted };
@@ -442,7 +505,7 @@ export async function syncTikTokWindow(env: BiEnv, from: string, to: string, fin
     const returns = await fetchReturns(env, fromSeconds, toSeconds);
     const returnsUpserted = await upsertReturns(env, returns);
     let affiliateUpserted = 0; let affiliateWarning = "";
-    try { affiliateUpserted = await upsertAffiliate(env, await fetchAffiliate(env, fromSeconds, toSeconds)); }
+    try { affiliateUpserted = (await syncAffiliateWindow(env,from,to)).attributions; }
     catch (error) { affiliateWarning = error instanceof Error ? error.message : "Affiliate API unavailable"; }
     const financeOrders = await env.DB.prepare(`SELECT DISTINCT order_id AS orderId FROM sales_lines WHERE ordered_at>=? AND ordered_at<? ORDER BY ordered_at LIMIT 25 OFFSET ?`)
       .bind(fromSeconds * 1000, toSeconds * 1000, Math.max(0, financeOffset)).all<{ orderId: string }>();
