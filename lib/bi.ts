@@ -343,17 +343,6 @@ function distribute(rows: PnlAccumulator[], amount: number, category: string) {
   for (const row of rows) addCost(row, category, amount * (total ? Math.max(0, row.gmv) / total : 1 / rows.length));
 }
 
-function normalizedReturnReason(raw: string) {
-  const value = raw.toLowerCase();
-  if (/damage|broken|defect|quality|not work/.test(value)) return "Damaged / Defective";
-  if (/wrong|incorrect|missing|not as described/.test(value)) return "Wrong / Missing Item";
-  if (/late|deliver|shipping/.test(value)) return "Delivery Issue";
-  if (/fit|size|large|small/.test(value)) return "Fit / Compatibility";
-  if (/no longer|change.*mind|unwanted|accident/.test(value)) return "Changed Mind / Not Needed";
-  if (/performance|expect|function/.test(value)) return "Performance / Expectation";
-  return "Other";
-}
-
 export function calculatePnl(
   sales: SalesFact[],
   costs: CostFact[],
@@ -492,7 +481,7 @@ export function calculateReturns(
     if (physicalReturn(item.returnType)) {
       row.returnedUnits += item.quantity;
       if (sale) row.returnShippingCost += item.quantity * matchingReturnShipping(returnShippingRules, item.sku, sale.orderedAt);
-      const rawReason = item.reason || "Unclassified"; const reason = normalizedReturnReason(rawReason);
+      const rawReason = item.reason || "Unclassified"; const reason = rawReason;
       const reasonRow = row.reasons.get(reason) ?? { count: 0, refundAmount: 0, rawReasons: new Map<string, number>() };
       reasonRow.count += item.quantity; reasonRow.refundAmount += refund; reasonRow.rawReasons.set(rawReason, (reasonRow.rawReasons.get(rawReason) || 0) + item.quantity); row.reasons.set(reason, reasonRow);
       if (sale) {
