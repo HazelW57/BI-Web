@@ -14,6 +14,7 @@ export async function ensureBbySchema(db: D1Database) {
   CREATE INDEX IF NOT EXISTS idx_bby_sales_store_date ON bby_sales_lines(store_code,ordered_at);
   CREATE TABLE IF NOT EXISTS bby_return_lines (id TEXT PRIMARY KEY,store_code TEXT NOT NULL,order_id TEXT,line_item_id TEXT,sku TEXT NOT NULL,reason TEXT NOT NULL,quantity INTEGER NOT NULL,refund_amount REAL NOT NULL,status TEXT NOT NULL,requested_at INTEGER NOT NULL,raw_json TEXT NOT NULL,updated_at INTEGER NOT NULL);
   CREATE INDEX IF NOT EXISTS idx_bby_returns_store_date ON bby_return_lines(store_code,requested_at);`);
+  await db.exec(`CREATE TABLE IF NOT EXISTS bby_sync_windows (id TEXT PRIMARY KEY,store_code TEXT NOT NULL,window_start TEXT NOT NULL,window_end TEXT NOT NULL,status TEXT NOT NULL,orders_count INTEGER NOT NULL,returns_count INTEGER NOT NULL,updated_at INTEGER NOT NULL);`);
 }
 
 function credential(env: BbyEnv, store: string) { const apiKey = store === "JS" ? env.BESTBUY_JS_API_KEY : env.BESTBUY_SAP_API_KEY; if (!apiKey) throw new Error(`Best Buy ${store} Mirakl secret is not configured`); return apiKey; }
@@ -25,13 +26,14 @@ async function mirakl(env: BbyEnv, store: string, path: string, params: Record<s
 }
 
 export async function syncBby(env: BbyEnv, store: "SAP"|"JS", from: string, to: string) {
-  await ensureBbySchema(env.DB); let offset=0,ordersCount=0,returnsCount=0;
+  await ensureBbySchema(env.DB); const windowId=`${store}:${from}:${to}`; const existing=await env.DB.prepare("SELECT status FROM bby_sync_windows WHERE id=?").bind(windowId).first<{status:string}>(); if(existing?.status==="success")return {store,orders:0,returns:0,skipped:true}; let offset=0,ordersCount=0,returnsCount=0;
   for(let page=0;page<500;page++) { const data=await mirakl(env,store,"/api/orders",{start_date:`${from}T00:00:00Z`,end_date:`${to}T23:59:59Z`,max:"100",offset:String(offset),order_tax_mode:"TAX_INCLUDED"}); const orders=(data.orders||[]) as Obj[];
     for(const order of orders){ const orderId=s(order.order_id,order.id); const orderedAt=ts(order.created_date,order.date_created); for(const line of (order.order_lines||[]) as Obj[]){ const lineId=s(line.order_line_id,line.id); const sku=s(line.offer_sku,line.product_sku,line.product?.sku,"UNKNOWN-SKU"); const quantity=Math.max(1,n(line.quantity)||1); const gross=n(line.price)||n(line.unit_price)*quantity; await env.DB.prepare(`INSERT INTO bby_sales_lines VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sku=excluded.sku,product_name=excluded.product_name,quantity=excluded.quantity,gross_sales=excluded.gross_sales,status=excluded.status,raw_json=excluded.raw_json,updated_at=excluded.updated_at`).bind(`${store}:${lineId}`,store,orderId,sku,s(line.product_title,line.product?.title,sku),quantity,orderedAt,gross,s(line.order_line_state,order.order_state),JSON.stringify({order,line}),Date.now()).run(); ordersCount++;
       for(const refund of (line.refunds||[]) as Obj[]){ const id=s(refund.refund_id,refund.id,`${lineId}:${refund.created_date||refund.date_created||refund.reason_code}`); const qty=Math.max(1,n(refund.quantity)||1); await env.DB.prepare(`INSERT INTO bby_return_lines VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET reason=excluded.reason,quantity=excluded.quantity,refund_amount=excluded.refund_amount,status=excluded.status,raw_json=excluded.raw_json,updated_at=excluded.updated_at`).bind(`${store}:${id}`,store,orderId,lineId,sku,s(refund.reason_label,refund.reason_code,"Refund"),qty,n(refund.amount)||n(refund.refund_amount),s(refund.state,refund.status,"REFUNDED"),ts(refund.created_date,refund.date_created,order.last_updated_date),JSON.stringify(refund),Date.now()).run(); returnsCount++; }
     }} if(orders.length<100) break; offset+=orders.length;
   }
-  return {store,orders:ordersCount,returns:returnsCount};
+  await env.DB.prepare(`INSERT INTO bby_sync_windows VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status='success',orders_count=excluded.orders_count,returns_count=excluded.returns_count,updated_at=excluded.updated_at`).bind(windowId,store,from,to,"success",ordersCount,returnsCount,Date.now()).run();
+  return {store,orders:ordersCount,returns:returnsCount,skipped:false};
 }
 
 export async function getBbyReturns(db:D1Database, input:{store:string;from:string;to:string;granularity:Granularity;sku?:string}) {
