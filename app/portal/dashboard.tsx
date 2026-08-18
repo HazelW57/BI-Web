@@ -320,6 +320,10 @@ function ReturnsView({ data, selectedSku, onSkuSelect }: { data: ReturnsData; se
       <Kpi label="RETURN SHIPPING" value={money.format(data.returnShippingCost)} note="Actual or per-unit fallback" source="Finance actual; uploaded rule fallback" />
       <Kpi label="ACTIVE SKUS" value={number.format(data.skuCount)} note={`${number.format(data.returnsCreatedDuringPeriod)} returns created in period`} source="Orders + Returns API" />
     </div>
+    <div className="dashboard-grid two-up">
+      <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">OVERALL RETURN RATE</p><h2>Return Rate Trend</h2><small>销售 cohort 口径：该期间售出的商品最终发生的退货。</small></div></div><OverallReturnTrend skus={data.skus} /></section>
+      <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SKU SHARE OF TOTAL RETURNS</p><h2>Returned Units Composition</h2><small>点击蓝色分区联动选择 SKU。</small></div></div><ReturnShareDonut rows={data.skus} onSelect={onSkuSelect} /></section>
+    </div>
     <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SKU RETURN RISK</p><h2>Return Rate by SKU</h2><small>按销售 cohort 计算；点击 SKU 可钻取全部 R&R 图表。</small></div><button className="clear-filter" onClick={() => onSkuSelect("ALL")}>All SKUs</button></div><ReturnRateBars rows={data.skus} onSelect={onSkuSelect} /></section>
     <div className="dashboard-grid two-up">
       <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">RETURN TREND</p><h2>{selected ? `${selected.sku} Return Trend` : "Select a SKU"}</h2></div></div>{selected ? <ReturnTrend rows={selected.trend} /> : <Empty>从 Return Rate by SKU 图中选择一个 SKU。</Empty>}</section>
@@ -328,6 +332,18 @@ function ReturnsView({ data, selectedSku, onSkuSelect }: { data: ReturnsData; se
     <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">REASON TREND</p><h2>Return Reason Trend</h2><small>原因变化按原订单销售 cohort 的日期粒度展示。</small></div></div>{selected ? <ReasonTrend rows={selected.reasonTrend} /> : <Empty>选择一个 SKU 后查看原因趋势。</Empty>}</section>
     <section className="panel source-panel"><div className="section-head"><div><p className="kicker">TRACEABILITY</p><h2>R&R 数据来源</h2></div></div><div className="source-list">{data.sources.map((source) => <div key={source.metric}><strong>{source.metric}</strong><span>{source.source}</span></div>)}</div></section>
   </>;
+}
+
+function OverallReturnTrend({ skus }: { skus: ReturnSku[] }) {
+  const keys = [...new Set(skus.flatMap((sku) => sku.trend.map((point) => point.key)))].sort();
+  const points = keys.map((key) => { const rows = skus.map((sku) => sku.trend.find((point) => point.key === key)).filter(Boolean) as ReturnSku["trend"]; const sold = rows.reduce((sum, row) => sum + row.soldUnits, 0); const returned = rows.reduce((sum, row) => sum + row.returnedUnits, 0); return { key, sold, returned, rate: sold ? returned / sold * 100 : 0 }; });
+  const max = Math.max(...points.map((point) => point.rate), 1); return <div className="overall-return-trend">{points.map((point) => <div key={point.key} title={`${point.key}\nSold ${point.sold}\nReturned ${point.returned}\nReturn Rate ${point.rate.toFixed(2)}%`}><strong>{point.rate.toFixed(1)}%</strong><i><u style={{ height: `${Math.max(3, point.rate / max * 100)}%` }} /></i><span>{point.key.slice(5)}</span></div>)}</div>;
+}
+
+function ReturnShareDonut({ rows, onSelect }: { rows: ReturnSku[]; onSelect: (sku: string) => void }) {
+  const ranked = rows.filter((row) => row.returnedUnits).sort((a, b) => b.returnedUnits - a.returnedUnits).slice(0, 10); const total = ranked.reduce((sum, row) => sum + row.returnedUnits, 0); let angle = 0;
+  const gradient = ranked.map((row, index) => { const start = angle; angle += total ? row.returnedUnits / total * 360 : 0; return `${palette[index % palette.length]} ${start}deg ${angle}deg`; }).join(",");
+  return <div className="return-donut-wrap"><button className="return-donut" style={{ background: `conic-gradient(${gradient || "#e6eef8 0deg 360deg"})` }} aria-label="SKU share of total returns"><span><b>{number.format(total)}</b><small>returned units</small></span></button><div className="donut-legend">{ranked.map((row, index) => <button key={row.sku} onClick={() => onSelect(row.sku)} title={`${row.sku}: ${row.returnedUnits} units · ${total ? (row.returnedUnits / total * 100).toFixed(2) : 0}%`}><i style={{ background: palette[index % palette.length] }} /><span>{row.sku}</span><b>{total ? (row.returnedUnits / total * 100).toFixed(1) : 0}%</b></button>)}</div></div>;
 }
 
 function ReturnRateBars({ rows, onSelect }: { rows: ReturnSku[]; onSelect: (sku: string) => void }) {
