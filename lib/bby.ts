@@ -1,6 +1,6 @@
 import type { Granularity } from "./bi";
 
-type BbyEnv = Env & { BESTBUY_MIRAKL_URL?: string; BESTBUY_SAP_API_KEY?: string; BESTBUY_JS_API_KEY?: string };
+type BbyEnv = Env & { BESTBUY_MIRAKL_URL?: string; BESTBUY_SAP_API_KEY?: string; BESTBUY_JS_API_KEY?: string; SESSION_SECRET?:string };
 type Obj = Record<string, any>;
 
 function n(value: any) { const raw = value && typeof value === "object" ? value.amount : value; const parsed = Number(raw); return Number.isFinite(parsed) ? parsed : 0; }
@@ -16,12 +16,17 @@ export async function ensureBbySchema(db: D1Database) {
   CREATE INDEX IF NOT EXISTS idx_bby_returns_store_date ON bby_return_lines(store_code,requested_at);`);
   await db.exec(`CREATE INDEX IF NOT EXISTS idx_bby_returns_store_order_sku ON bby_return_lines(store_code,order_id,sku);`);
   await db.exec(`CREATE TABLE IF NOT EXISTS bby_sync_windows (id TEXT PRIMARY KEY,store_code TEXT NOT NULL,window_start TEXT NOT NULL,window_end TEXT NOT NULL,status TEXT NOT NULL,orders_count INTEGER NOT NULL,returns_count INTEGER NOT NULL,updated_at INTEGER NOT NULL);`);
+  await db.exec(`CREATE TABLE IF NOT EXISTS bby_store_credentials (store_code TEXT PRIMARY KEY,ciphertext TEXT NOT NULL,iv TEXT NOT NULL,updated_at INTEGER NOT NULL);`);
 }
 
-function credential(env: BbyEnv, store: string) { const apiKey = store === "JS" ? env.BESTBUY_JS_API_KEY : env.BESTBUY_SAP_API_KEY; if (!apiKey) throw new Error(`Best Buy ${store} Mirakl secret is not configured`); return apiKey; }
+function base64(bytes:Uint8Array){let text="";for(const byte of bytes)text+=String.fromCharCode(byte);return btoa(text);}
+function bytes(value:string){const text=atob(value),result=new Uint8Array(text.length);for(let i=0;i<text.length;i++)result[i]=text.charCodeAt(i);return result;}
+async function encryptionKey(env:BbyEnv){if(!env.SESSION_SECRET)throw new Error("Credential encryption secret is not configured");const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(env.SESSION_SECRET));return crypto.subtle.importKey("raw",digest,{name:"AES-GCM"},false,["encrypt","decrypt"]);}
+export async function configureBbyCredential(env:BbyEnv,store:"SAP"|"JS",apiKey:string){await ensureBbySchema(env.DB);if(!apiKey.trim())throw new Error("Mirakl API key is required");const iv=crypto.getRandomValues(new Uint8Array(12));const ciphertext=await crypto.subtle.encrypt({name:"AES-GCM",iv},await encryptionKey(env),new TextEncoder().encode(apiKey.trim()));await env.DB.prepare(`INSERT INTO bby_store_credentials(store_code,ciphertext,iv,updated_at) VALUES(?,?,?,?) ON CONFLICT(store_code) DO UPDATE SET ciphertext=excluded.ciphertext,iv=excluded.iv,updated_at=excluded.updated_at`).bind(store,base64(new Uint8Array(ciphertext)),base64(iv),Date.now()).run();return {store,configured:true};}
+async function credential(env: BbyEnv, store: string) { const saved=await env.DB.prepare(`SELECT ciphertext,iv FROM bby_store_credentials WHERE store_code=?`).bind(store).first<{ciphertext:string;iv:string}>();if(saved){const plaintext=await crypto.subtle.decrypt({name:"AES-GCM",iv:bytes(saved.iv)},await encryptionKey(env),bytes(saved.ciphertext));return new TextDecoder().decode(plaintext);}const apiKey = store === "JS" ? env.BESTBUY_JS_API_KEY : env.BESTBUY_SAP_API_KEY; if (!apiKey) throw new Error(`Best Buy ${store} Mirakl secret is not configured`); return apiKey; }
 async function mirakl(env: BbyEnv, store: string, path: string, params: Record<string,string>) {
   const base=(env.BESTBUY_MIRAKL_URL || "https://bestbuyus-prod.mirakl.net").replace(/\/$/,""); const url=new URL(`${base}${path}`); Object.entries(params).forEach(([k,v])=>url.searchParams.set(k,v));
-  const token=credential(env,store); let response=await fetch(url,{headers:{Authorization:token,Accept:"application/json"}});
+  const token=await credential(env,store); let response=await fetch(url,{headers:{Authorization:token,Accept:"application/json"}});
   if(response.status===401||response.status===403) response=await fetch(url,{headers:{Authorization:`Bearer ${token}`,Accept:"application/json"}});
   if(!response.ok) throw new Error(`Mirakl ${path} ${response.status}`); return response.json() as Promise<Obj>;
 }
