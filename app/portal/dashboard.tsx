@@ -53,9 +53,9 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
   const [tab, setTab] = useState<Tab>("tts");
   const [ttsTab, setTtsTab] = useState<TtsTab>("pnl");
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("uploads");
-  const [from, setFrom] = useState("2026-02-01");
+  const [from, setFrom] = useState("2026-05-01");
   const [to, setTo] = useState(dateInput(today));
-  const [granularity, setGranularity] = useState<Granularity>("monthly");
+  const [granularity, setGranularity] = useState<Granularity>("weekly");
   const [product, setProduct] = useState("ALL");
   const [sku, setSku] = useState("ALL");
   const [returnType, setReturnType] = useState("ALL");
