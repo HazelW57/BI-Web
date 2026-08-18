@@ -446,7 +446,7 @@ function ReturnsView({ data, previous, selectedSku, onSkuSelect, platform = "Tik
       <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SKU SHARE OF TOTAL RETURNS</p><h2>Returned Units Composition</h2><small>点击蓝色分区联动选择 SKU。</small></div></div><ReturnShareDonut rows={data.skus} onSelect={onSkuSelect} /></section>
     </div>
     <div className={`dashboard-grid ${selected ? "two-up" : ""}`}>
-      <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">RETURN RATE BY SKU · CLICK TO CROSS-FILTER</p><h2>SKU Risk Ranking</h2></div><button className="clear-filter" onClick={() => onSkuSelect("ALL")}>All SKUs</button></div><ReturnRateBars rows={data.skus} onSelect={onSkuSelect} /></section>
+      <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">RETURN RATE BY SKU · CLICK TO CROSS-FILTER</p><h2>SKU Risk Ranking</h2><small>Sorted by Return Rate ↓ · ties: Returned Units ↓, Sold Units ↓</small></div><button className="clear-filter" onClick={() => onSkuSelect("ALL")}>All SKUs</button></div><ReturnRateBars rows={data.skus} onSelect={onSkuSelect} /></section>
       {selected && <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SELECTED SKU TREND</p><h2>{selected.sku}</h2></div></div><ReturnTrend rows={selected.trend} /></section>}
     </div>
     {selected && <div className="dashboard-grid two-up"><section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SELECTED SKU · PLATFORM RETURN REASONS</p><h2>{`Why ${selected.sku} Is Returned`}</h2><small>保留 {platform} 返回的原始原因，不做人工合并。</small></div></div><ReasonDistribution skus={data.skus} selected={selected} /></section><section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SKU × PLATFORM RETURN REASON MIX (100%)</p><h2>Platform Reason Composition by SKU</h2></div></div><ReasonDistribution skus={data.skus} /></section></div>}
@@ -466,8 +466,9 @@ function ReturnShareDonut({ rows, onSelect }: { rows: ReturnSku[]; onSelect: (sk
 }
 
 function ReturnRateBars({ rows, onSelect }: { rows: ReturnSku[]; onSelect: (sku: string) => void }) {
-  const max = Math.max(...rows.map((row) => row.returnRate), 1);
-  return <div className="return-rate-bars">{rows.slice(0, 30).map((row) => <button key={row.sku} onClick={() => onSelect(row.sku)} title={`SKU: ${row.sku}\nSold Units ${number.format(row.soldUnits)}\nReturned Units ${number.format(row.returnedUnits)}\nReturn Rate ${row.returnRate.toFixed(2)}%\nRefund Amount ${preciseMoney.format(row.refundAmount)}\nTop Return Reason ${row.reasons[0]?.reason || "None"}`}><strong>{row.sku}</strong><i><u style={{ width: `${row.returnRate / max * 100}%` }} /></i><span>{row.returnRate.toFixed(2)}%</span></button>)}</div>;
+  const ranked=[...rows].sort((a,b)=>b.returnRate-a.returnRate||b.returnedUnits-a.returnedUnits||b.soldUnits-a.soldUnits||a.sku.localeCompare(b.sku));
+  const max = Math.max(...ranked.map((row) => row.returnRate), 1);
+  return <div className="return-rate-bars">{ranked.slice(0, 30).map((row) => <button key={row.sku} onClick={() => onSelect(row.sku)} title={`SKU: ${row.sku}\nSold Units ${number.format(row.soldUnits)}\nReturned Units ${number.format(row.returnedUnits)}\nReturn Rate ${row.returnRate.toFixed(2)}%\nRefund Amount ${preciseMoney.format(row.refundAmount)}\nTop Return Reason ${row.reasons[0]?.reason || "None"}`}><strong>{row.sku}</strong><i><u style={{ width: `${row.returnRate / max * 100}%` }} /></i><span>{row.returnRate.toFixed(2)}%</span></button>)}</div>;
 }
 
 function ReturnTrend({ rows }: { rows: ReturnSku["trend"] }) {
