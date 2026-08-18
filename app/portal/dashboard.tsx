@@ -430,7 +430,7 @@ function MarketingChart({ rows }: { rows: PnlRow[] }) {
 function ReturnsView({ data, previous, selectedSku, onSkuSelect, platform = "TikTok" }: { data: ReturnsData; previous: ReturnsData; selectedSku: string; onSkuSelect: (sku: string) => void; platform?: string }) {
   const selected = selectedSku !== "ALL" ? data.skus.find((row) => row.sku === selectedSku) : undefined;
   return <>
-    <div className="kpi-grid returns-kpis">
+    <div className={`kpi-grid returns-kpis${data.orderCount !== undefined ? " bby-kpis" : ""}`}>
       {data.orderCount !== undefined && <Kpi label="ORDERS" value={number.format(data.orderCount)} current={data.orderCount} previous={previous.orderCount || 0} note="Distinct valid Mirakl order IDs" source={`${platform} Orders API`} status="Actual" />}
       <Kpi label="SOLD UNITS" value={number.format(data.totalSoldUnits ?? data.soldUnits)} current={data.totalSoldUnits ?? data.soldUnits} previous={previous.totalSoldUnits ?? previous.soldUnits} note="All valid sold units, including samples" source={`${platform} Orders API`} status="Actual" />
       <Kpi label="SOLD UNITS · EXCL. SAMPLES" value={number.format(data.commercialSoldUnits ?? data.soldUnits)} current={data.commercialSoldUnits ?? data.soldUnits} previous={previous.commercialSoldUnits ?? previous.soldUnits} note={`${number.format(data.sampleUnits || 0)} sample units excluded`} source={`${platform} order type`} status="Actual" />
