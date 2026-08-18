@@ -131,14 +131,19 @@ async function upsertOrders(env: BiEnv, orders: JsonRecord[]) {
       .bind(orderId, timestampValue(order.create_time ?? order.created_at), JSON.stringify(order), now));
     const payment = asRecord(order.payment);
     const lines = asArray(order.line_items ?? order.order_line_items).map(asRecord);
+    const lineOriginalTotal = lines.reduce((sum, item) => sum + numberValue(item.original_price ?? item.sale_price ?? item.sku_original_price, 0) * Math.max(1, Math.round(numberValue(item.quantity, 1))), 0);
+    const orderOriginal = numberValue(payment.original_total_product_price, lineOriginalTotal);
+    const orderSellerDiscount = Math.abs(numberValue(payment.seller_discount, 0));
+    const orderGmv = Math.max(0, orderOriginal - orderSellerDiscount);
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index];
       const lineId = stringValue(line.id, line.order_line_item_id, line.line_item_id) || `${orderId}-${index}`;
       const sku = mappedSku(stringValue(line.seller_sku, line.sku_id, line.sku_name, line.product_id) || "UNKNOWN-SKU");
       const quantity = Math.max(1, Math.round(numberValue(line.quantity, 1)));
       const unitPrice = numberValue(line.original_price ?? line.sale_price ?? line.sku_original_price, 0);
-      const grossSales = unitPrice * quantity || (lines.length === 1 ? numberValue(payment.original_total_product_price ?? payment.total_amount, 0) : 0);
-      const sellerDiscount = lines.length === 1 ? Math.abs(numberValue(payment.seller_discount, 0)) : 0;
+      const lineOriginal = unitPrice * quantity;
+      const grossSales = orderGmv * (lineOriginalTotal ? lineOriginal / lineOriginalTotal : 1 / Math.max(lines.length, 1));
+      const sellerDiscount = 0;
       const shippingRevenue = lines.length === 1 ? numberValue(payment.shipping_fee, 0) : 0;
       const currency = stringValue(line.currency, payment.currency, order.currency) || "USD";
       statements.push(env.DB.prepare(`INSERT INTO sales_lines (
