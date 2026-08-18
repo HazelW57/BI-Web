@@ -288,13 +288,27 @@ export async function syncAffiliateWindow(env: BiEnv, from: string, to: string) 
     pageToken=stringValue(data.next_page_token,data.nextPageToken); if(!pageToken) break;
     if(seen.has(pageToken)) throw new Error("Affiliate Seller API returned a repeated page token"); seen.add(pageToken);
   }
-  const orderIds=await env.DB.prepare(`SELECT DISTINCT order_id AS orderId FROM affiliate_attributions WHERE attributed_at>=? AND attributed_at<?`).bind(fromSeconds*1000,toSeconds*1000).all<{orderId:string}>();
-  let final=0,financePending=0;
-  for(const {orderId} of orderIds.results){try{final+=await applyFinance(env,orderId,"FINAL");}catch{financePending+=1;}}
+  const finance = await syncAffiliateFinanceBatch(env, 20);
   await env.DB.prepare(`INSERT INTO sync_windows(id,source,window_start,window_end,status,item_count,page_count,message,updated_at)
     VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,item_count=excluded.item_count,page_count=excluded.page_count,message=excluded.message,updated_at=excluded.updated_at`)
-    .bind(`affiliate:${from}:${to}`,"affiliate",from,to,"success",items,pages,`${final} finance rows final; ${financePending} orders pending`,Date.now()).run();
-  return {from,to,pages,attributions:items,financeRowsFinal:final,financeOrdersPending:financePending};
+    .bind(`affiliate:${from}:${to}`,"affiliate",from,to,"success",items,pages,`${finance.transactions} finance rows final; ${finance.remaining} orders pending`,Date.now()).run();
+  return {from,to,pages,attributions:items,financeRowsFinal:finance.transactions,financeOrdersPending:finance.remaining};
+}
+
+export async function syncAffiliateFinanceBatch(env: BiEnv, limit = 20) {
+  await ensureBiSchema(env.DB); validateConfig(env);
+  const safeLimit = Math.min(Math.max(Math.round(limit), 1), 20);
+  const orders = await env.DB.prepare(`SELECT DISTINCT a.order_id AS orderId FROM affiliate_attributions a
+    WHERE NOT EXISTS (SELECT 1 FROM affiliate_commissions f WHERE f.order_id=a.order_id AND f.status='FINAL')
+    ORDER BY COALESCE((SELECT MAX(p.updated_at) FROM affiliate_commissions p WHERE p.order_id=a.order_id),0),a.attributed_at LIMIT ?`).bind(safeLimit).all<{orderId:string}>();
+  let transactions = 0; let pending = 0;
+  for (const { orderId } of orders.results) {
+    try { const count = await applyFinance(env, orderId, "FINAL"); transactions += count; if (!count) pending += 1; }
+    catch { pending += 1; }
+  }
+  const remaining = await env.DB.prepare(`SELECT COUNT(DISTINCT a.order_id) AS count FROM affiliate_attributions a
+    LEFT JOIN affiliate_commissions c ON c.order_id=a.order_id AND c.status='FINAL' WHERE c.order_id IS NULL`).first<{count:number}>();
+  return { checked: orders.results.length, transactions, pending, remaining: remaining?.count || 0 };
 }
 
 export async function backfillAffiliate(env: BiEnv, from="2026-02-01", to=new Date().toISOString().slice(0,10)) {

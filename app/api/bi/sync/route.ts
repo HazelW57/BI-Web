@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { getSession, isAdmin } from "../../../auth";
 import { getSyncStatus } from "../../../../lib/bi";
-import { backfillAffiliate, syncAffiliateWindow, syncFinanceBatch, syncFinanceStatements, syncTikTok, syncTikTokWindow } from "../../../../lib/tiktok";
+import { backfillAffiliate, syncAffiliateFinanceBatch, syncAffiliateWindow, syncFinanceBatch, syncFinanceStatements, syncTikTok, syncTikTokWindow } from "../../../../lib/tiktok";
 
 export async function GET() {
   if (!(await getSession())) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -17,6 +17,7 @@ export async function POST(request: Request) {
     if (body.mode === "finance") return NextResponse.json(await syncFinanceBatch(env, Number(body.limit) || 25));
     if (body.mode === "finance_statements" && body.from && body.to) return NextResponse.json(await syncFinanceStatements(env, body.from, body.to));
     if (body.mode === "affiliate_backfill") return NextResponse.json(await backfillAffiliate(env,body.from||"2026-02-01",body.to||new Date().toISOString().slice(0,10)));
+    if (body.mode === "affiliate_finance") return NextResponse.json(await syncAffiliateFinanceBatch(env, Number(body.limit) || 20));
     if (body.mode === "affiliate" && body.from && body.to) return NextResponse.json(await syncAffiliateWindow(env,body.from,body.to));
     if (body.from && body.to) return NextResponse.json(await syncTikTokWindow(env, body.from, body.to, Number(body.financeOffset) || 0));
     return NextResponse.json(await syncTikTok(env, Number(body.days) || 7));

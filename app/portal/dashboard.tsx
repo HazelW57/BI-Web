@@ -164,6 +164,16 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
         });
         attributions += result.attributions; finalRows += result.financeRowsFinal; pendingOrders += result.financeOrdersPending; windows += 1; cursor = next;
       }
+      let remaining = pendingOrders; const financeQueue = pendingOrders; let checked = 0; let batches = 0;
+      while (remaining > 0 && checked < financeQueue && batches < 1000) {
+        setNotice(`Affiliate Finance 对账中：尚有 ${remaining} 个订单待核对（batch ${batches + 1}）`);
+        const result = await getJson<{ checked: number; transactions: number; remaining: number }>("/api/bi/sync", {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "affiliate_finance", limit: 20 }),
+        });
+        finalRows += result.transactions; remaining = result.remaining; checked += result.checked; batches += 1;
+        if (!result.checked) break;
+      }
+      pendingOrders = remaining;
       setNotice(`Affiliate 回填完成：${windows} 个时间窗，${attributions} 条 attribution，${finalRows} 条 Final；${pendingOrders} 个订单仍为 Pending。`);
       await refresh();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Affiliate 历史回填失败"); setBusy(false); }
