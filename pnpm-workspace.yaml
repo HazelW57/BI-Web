@@ -1,6 +1,10 @@
 packages:
   - "."
 
+# This exact Workers type release is already pinned in the existing lockfile.
+minimumReleaseAgeExclude:
+  - "@cloudflare/workers-types"
+
 allowBuilds:
   esbuild: true
   sharp: true

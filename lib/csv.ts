@@ -18,6 +18,6 @@ export function parseCsv(input: string) {
   row.push(field.trim());
   if (row.some(Boolean)) rows.push(row);
   if (!rows.length) return [];
-  const headers = rows[0].map((header) => header.trim().toLowerCase().replace(/[\s-]+/g, "_"));
+  const headers = rows[0].map((header) => header.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, ""));
   return rows.slice(1).map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ""])));
 }

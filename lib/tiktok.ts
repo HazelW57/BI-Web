@@ -220,14 +220,23 @@ async function applyFinance(env: BiEnv, orderId: string) {
       : await env.DB.prepare("SELECT id FROM sales_lines WHERE order_id = ? AND (? = '' OR sku = ?) ORDER BY ordered_at LIMIT 1").bind(orderId, sku, sku).first<{ id: string }>();
     if (!row) continue;
     const revenue = numberValue(transaction.revenue_amount, 0);
-    const fee = Math.abs(numberValue(transaction.fee_and_tax_amount ?? transaction.fee_tax_amount, 0));
+    const feeAndTax = Math.abs(numberValue(transaction.fee_and_tax_amount ?? transaction.fee_tax_amount, 0));
     const shipping = Math.abs(numberValue(transaction.shipping_cost_amount, 0));
     const settlement = numberValue(transaction.settlement_amount, 0);
     const affiliate = Math.abs(firstNamedAmount(transaction, /affiliate.*commission.*amount/i));
+    const fee = Math.max(0, feeAndTax - affiliate);
     const refund = Math.abs(firstNamedAmount(transaction, /gross.*sales.*refund.*amount|refund.*amount/i));
+    const returnShipping = Math.abs(firstNamedAmount(transaction, /return.*shipping.*amount|shipping.*return.*amount/i));
     await env.DB.prepare(`UPDATE sales_lines SET financial_net_sales=?, platform_fee=?, affiliate_commission=?,
       shipping_cost=?, settlement_amount=?, refund_amount=MAX(refund_amount, ?), updated_at=? WHERE id=?`)
       .bind(revenue, fee, affiliate, shipping, settlement, refund, Date.now(), row.id).run();
+    await env.DB.prepare(`INSERT INTO finance_line_costs (sales_line_id,return_shipping_actual,updated_at) VALUES (?,?,?)
+      ON CONFLICT(sales_line_id) DO UPDATE SET return_shipping_actual=excluded.return_shipping_actual,updated_at=excluded.updated_at`)
+      .bind(row.id, returnShipping, Date.now()).run();
+    const transactionId = stringValue(transaction.id, transaction.transaction_id) || `${orderId}:${lineId || sku || "order"}`;
+    await env.DB.prepare(`INSERT INTO raw_finance_transactions (id,order_id,line_item_id,sku,raw_json,updated_at) VALUES (?,?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET raw_json=excluded.raw_json,updated_at=excluded.updated_at`)
+      .bind(transactionId, orderId, lineId, sku, JSON.stringify(transaction), Date.now()).run();
   }
 }
 

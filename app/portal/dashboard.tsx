@@ -1,23 +1,51 @@
 "use client";
 
 import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
+import readXlsxFile from "read-excel-file/browser";
 
 type Allowed = { email: string; role: string; createdAt: number };
-type PnlRow = { key: string; revenue: number; units: number; cogs: number; platformFees: number; shippingCost: number; agencyFees: number; contributionProfit: number; operatingProfit: number; margin: number; settlement: number };
-type PnlData = { range: { from: string; to: string }; total: PnlRow; months: PnlRow[]; skus: PnlRow[] };
-type ReturnSku = { sku: string; soldUnits: number; returnedUnits: number; returnRate: number; reasons: { reason: string; count: number; share: number }[] };
-type ReturnsData = { range: { from: string; to: string }; soldUnits: number; returnedUnits: number; returnRate: number; skuCount: number; skus: ReturnSku[] };
-type SyncData = { configured: boolean; lastRun: null | { status: string; ordersUpserted: number; returnsUpserted: number; message: string; startedAt: number; completedAt: number | null } };
+type PnlRow = {
+  key: string; gmv: number; orders: number; units: number; refunds: number; tiktokFees: number;
+  sellerShippingCost: number; netRevenue: number; cogs: number; affiliateCommission: number; adSpend: number;
+  videoAgencyFees: number; liveAgencyFees: number; returnShippingCost: number; otherCosts: number;
+  operatingProfit: number; margin: number; settlement: number; estimatedReturnShipping: boolean;
+};
+type Source = { metric: string; source: string; status?: string };
+type Dimensions = { products: string[]; skus: string[]; returnTypes?: string[]; returnStatuses?: string[] };
+type PnlData = { range: { from: string; to: string }; granularity: string; dimensions: Dimensions; total: PnlRow; trend: PnlRow[]; months: PnlRow[]; skus: PnlRow[]; sources: Source[] };
+type Reason = { reason: string; count: number; share: number; refundAmount: number };
+type ReturnSku = {
+  sku: string; productName: string; soldUnits: number; returnedUnits: number; returnRate: number; refundAmount: number;
+  refundGmvRate: number; returnShippingCost: number; reasons: Reason[];
+  trend: { key: string; soldUnits: number; returnedUnits: number; returnRate: number }[];
+  reasonTrend: { key: string; reasons: { reason: string; count: number; share: number }[] }[];
+};
+type ReturnsData = {
+  range: { from: string; to: string }; granularity: string; dimensions: Dimensions; soldUnits: number; returnedUnits: number;
+  returnRate: number; refundAmount: number; refundGmvRate: number; returnShippingCost: number; skuCount: number;
+  returnsCreatedDuringPeriod: number; skus: ReturnSku[]; sources: Source[];
+};
+type SyncData = {
+  configured: boolean;
+  lastRun: null | { status: string; ordersUpserted: number; returnsUpserted: number; message: string; startedAt: number; completedAt: number | null };
+  counts?: { salesLines: number; returnLines: number; productCostRules: number; agencyRules: number; returnShippingRules: number; manualCosts: number };
+};
 type Tab = "bby" | "walmart" | "pricing" | "tts" | "settings";
-type TtsTab = "pnl" | "returns" | "health";
+type TtsTab = "pnl" | "sales" | "marketing" | "returns" | "costs" | "health";
 type SettingsTab = "access" | "uploads";
+type Granularity = "daily" | "weekly" | "monthly";
 
-const emptyPnl: PnlData = { range: { from: "", to: "" }, total: { key: "total", revenue: 0, units: 0, cogs: 0, platformFees: 0, shippingCost: 0, agencyFees: 0, contributionProfit: 0, operatingProfit: 0, margin: 0, settlement: 0 }, months: [], skus: [] };
-const emptyReturns: ReturnsData = { range: { from: "", to: "" }, soldUnits: 0, returnedUnits: 0, returnRate: 0, skuCount: 0, skus: [] };
+const emptyRow: PnlRow = { key: "total", gmv: 0, orders: 0, units: 0, refunds: 0, tiktokFees: 0, sellerShippingCost: 0, netRevenue: 0, cogs: 0, affiliateCommission: 0, adSpend: 0, videoAgencyFees: 0, liveAgencyFees: 0, returnShippingCost: 0, otherCosts: 0, operatingProfit: 0, margin: 0, settlement: 0, estimatedReturnShipping: false };
+const emptyDimensions: Dimensions = { products: [], skus: [], returnTypes: [], returnStatuses: [] };
+const emptyPnl: PnlData = { range: { from: "", to: "" }, granularity: "monthly", dimensions: emptyDimensions, total: emptyRow, trend: [], months: [], skus: [], sources: [] };
+const emptyReturns: ReturnsData = { range: { from: "", to: "" }, granularity: "monthly", dimensions: emptyDimensions, soldUnits: 0, returnedUnits: 0, returnRate: 0, refundAmount: 0, refundGmvRate: 0, returnShippingCost: 0, skuCount: 0, returnsCreatedDuringPeriod: 0, skus: [], sources: [] };
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+const preciseMoney = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
 const number = new Intl.NumberFormat("en-US");
+const palette = ["#0B1F3A", "#1557D6", "#2878E8", "#54A6F5", "#25B7D3", "#7CC8F8", "#8EA9F8", "#B6D8FF", "#0D9B8C", "#D8E9FF"];
 
 function dateInput(date: Date) { return date.toISOString().slice(0, 10); }
+function percentOf(value: number, base: number) { return base ? `${(value / base * 100).toFixed(1)}% of GMV` : "0.0% of GMV"; }
 
 export default function Dashboard({ email, admin, initialAllowed }: { email: string; admin: boolean; initialAllowed: Allowed[] }) {
   const today = useMemo(() => new Date(), []);
@@ -26,6 +54,11 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("uploads");
   const [from, setFrom] = useState(dateInput(new Date(today.getTime() - 89 * 86_400_000)));
   const [to, setTo] = useState(dateInput(today));
+  const [granularity, setGranularity] = useState<Granularity>("monthly");
+  const [product, setProduct] = useState("ALL");
+  const [sku, setSku] = useState("ALL");
+  const [returnType, setReturnType] = useState("ALL");
+  const [returnStatus, setReturnStatus] = useState("ALL");
   const [pnl, setPnl] = useState<PnlData>(emptyPnl);
   const [returns, setReturns] = useState<ReturnsData>(emptyReturns);
   const [sync, setSync] = useState<SyncData>({ configured: false, lastRun: null });
@@ -45,47 +78,69 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
   const refresh = useCallback(async () => {
     setBusy(true); setError("");
     try {
-      const query = new URLSearchParams({ from, to });
+      const query = new URLSearchParams({ from, to, granularity, product, sku, returnType, returnStatus });
       const [pnlData, returnsData, syncData] = await Promise.all([
-        getJson<PnlData>(`/api/bi/pnl?${query}`),
-        getJson<ReturnsData>(`/api/bi/returns?${query}`),
-        getJson<SyncData>("/api/bi/sync"),
+        getJson<PnlData>(`/api/bi/pnl?${query}`), getJson<ReturnsData>(`/api/bi/returns?${query}`), getJson<SyncData>("/api/bi/sync"),
       ]);
       setPnl(pnlData); setReturns(returnsData); setSync(syncData);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "数据读取失败"); }
     finally { setBusy(false); }
-  }, [from, getJson, to]);
+  }, [from, getJson, granularity, product, returnStatus, returnType, sku, to]);
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => { void refresh(); }, 0);
-    return () => window.clearTimeout(timer);
-  }, [refresh]);
+  useEffect(() => { const timer = window.setTimeout(() => { void refresh(); }, 80); return () => window.clearTimeout(timer); }, [refresh]);
 
   async function upload(kind: string, event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) return;
+    const file = event.target.files?.[0]; event.target.value = ""; if (!file) return;
     setBusy(true); setError(""); setNotice("");
     try {
       const body = new FormData(); body.set("kind", kind); body.set("file", file);
       const result = await getJson<{ rows: number }>("/api/bi/import", { method: "POST", body });
-      setNotice(`已导入 ${result.rows} 行，P&L 已自动重算。`);
-      await refresh();
+      setNotice(`已导入 ${result.rows} 行，所有 P&L 与 R&R 指标已自动重算。`); await refresh();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "上传失败"); setBusy(false); }
+  }
+
+  async function uploadWorkbook(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]; event.target.value = ""; if (!file) return;
+    setBusy(true); setError(""); setNotice("");
+    try {
+      const workbook = await readXlsxFile(file);
+      const mapping: Record<string, { kind: string; header: string }> = {
+        "Product Cost": { kind: "product_cost", header: "Seller SKU" },
+        "Agency Fee Rules": { kind: "agency_fee_rules", header: "Fee Name" },
+        "Return Shipping Cost": { kind: "return_shipping_cost", header: "Seller SKU" },
+        "Manual Costs": { kind: "manual_costs", header: "Date / Month" },
+      };
+      let imported = 0;
+      for (const sheet of workbook) {
+        const config = mapping[sheet.sheet]; if (!config) continue;
+        const headerIndex = sheet.data.findIndex((row) => String(row[0] || "").trim() === config.header);
+        if (headerIndex < 0) throw new Error(`${sheet.sheet} 缺少标准表头`);
+        const rows = sheet.data.slice(headerIndex).filter((row, index) => index === 0 || (row.some((value) => value !== null && String(value).trim()) && !String(row[0] || "").startsWith("EXAMPLE")));
+        if (rows.length === 1) continue;
+        const csv = rows.map((row, rowIndex) => row.map((value, columnIndex) => {
+          let output: string | number | boolean = value instanceof Date ? value.toISOString().slice(0, 10) : value ?? "";
+          if (sheet.sheet === "Agency Fee Rules" && rowIndex > 0 && columnIndex === 5 && typeof output === "number" && output <= 1) output = `${output * 100}%`;
+          const text = String(output); return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+        }).join(",")).join("\n");
+        const body = new FormData(); body.set("kind", config.kind); body.set("file", new File([csv], `${config.kind}.csv`, { type: "text/csv" }));
+        const result = await getJson<{ rows: number }>("/api/bi/import", { method: "POST", body }); imported += result.rows;
+      }
+      if (!imported) throw new Error("工作簿中没有可导入的数据；请在示例行下方填写实际成本。");
+      setNotice(`Excel 工作簿已导入 ${imported} 行，P&L 与 R&R 已自动重算。`); await refresh();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Excel 导入失败"); setBusy(false); }
   }
 
   async function syncNow() {
     setBusy(true); setError(""); setNotice("");
     try {
       const result = await getJson<{ ordersUpserted: number; returnsUpserted: number }>("/api/bi/sync", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ days: 30 }) });
-      setNotice(`TikTok 同步完成：${result.ordersUpserted} 条销售行，${result.returnsUpserted} 条退货行。`);
-      await refresh();
+      setNotice(`TikTok 同步完成：${result.ordersUpserted} 条销售行，${result.returnsUpserted} 条退货行。`); await refresh();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "同步失败"); setBusy(false); }
   }
 
   async function updateAccess(method: "POST" | "DELETE", target: string) {
     const password = method === "POST" ? prompt("请为该邮箱设置至少 10 位临时密码：") || "" : undefined;
-    if (method === "POST" && password.length < 10) { setError("临时密码至少需要 10 位"); return; }
+    if (method === "POST" && (!password || password.length < 10)) { setError("临时密码至少需要 10 位"); return; }
     try {
       const data = await getJson<{ items: Allowed[] }>("/api/access", { method, headers: { "content-type": "application/json" }, body: JSON.stringify({ email: target, password }) });
       setItems(data.items); setNewEmail("");
@@ -93,46 +148,65 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
   }
 
   async function logout() { await fetch("/api/logout", { method: "POST" }); location.href = "/"; }
-
   const nav: { key: Tab; label: string; eyebrow: string }[] = [
-    { key: "bby", label: "BBY", eyebrow: "BEST BUY" },
-    { key: "walmart", label: "Walmart", eyebrow: "MARKETPLACE" },
-    { key: "pricing", label: "价格核验", eyebrow: "PRICE CHECK" },
-    { key: "tts", label: "TTS", eyebrow: "TIKTOK SHOP" },
+    { key: "bby", label: "BBY", eyebrow: "BEST BUY" }, { key: "walmart", label: "Walmart", eyebrow: "MARKETPLACE" },
+    { key: "pricing", label: "价格核验", eyebrow: "PRICE CHECK" }, { key: "tts", label: "TTS", eyebrow: "TIKTOK SHOP" },
     { key: "settings", label: "设置", eyebrow: "CONTROL" },
   ];
-  const openUploads = () => { setSettingsTab("uploads"); setTab("settings"); };
+  const openCosts = () => { setTtsTab("costs"); setTab("tts"); };
+  const dimensions = pnl.dimensions.products.length || pnl.dimensions.skus.length ? pnl.dimensions : returns.dimensions;
 
   return <main className="shell">
     <aside className="sidebar">
-      <div className="side-brand"><span className="brand-mark">S</span><span>SAPHIANT<small>COMMERCE BI</small></span></div>
+      <div className="side-brand"><img src="/saphiant-logo.png" alt="Saphiant" /><small>COMMERCE INTELLIGENCE</small></div>
       <nav>{nav.map((item, index) => <button key={item.key} onClick={() => setTab(item.key)} className={tab === item.key ? "active" : ""}><i>0{index + 1}</i><span>{item.label}<small>{item.eyebrow}</small></span></button>)}</nav>
       <div className="side-user"><strong>{admin ? "Hazel · Owner" : "Authorized Viewer"}</strong><small>{email}</small><button onClick={logout}>安全退出</button></div>
     </aside>
 
     <section className="workspace">
       <header className="topbar"><div><p className="crumb">SAPHIANT / COMMERCE INTELLIGENCE</p><h1>{nav.find((item) => item.key === tab)?.label}</h1></div><div className="top-status"><span className={sync.configured ? "live" : "pending"}>{sync.configured ? "TTS 数据在线" : "TTS API 待配置"}</span></div></header>
-      {tab === "tts" && <div className="subnav"><button className={ttsTab === "pnl" ? "active" : ""} onClick={() => setTtsTab("pnl")}>P&amp;L Summary</button><button className={ttsTab === "returns" ? "active" : ""} onClick={() => setTtsTab("returns")}>R&amp;R</button><button className={ttsTab === "health" ? "active" : ""} onClick={() => setTtsTab("health")}>Data Health</button></div>}
+      {tab === "tts" && <div className="subnav tts-subnav">{[
+        ["pnl", "P&L Overview"], ["sales", "Sales & Orders"], ["marketing", "Marketing"], ["returns", "R&R"], ["costs", "Cost Inputs"], ["health", "Data Health"],
+      ].map(([key, label]) => <button key={key} className={ttsTab === key ? "active" : ""} onClick={() => setTtsTab(key as TtsTab)}>{label}</button>)}</div>}
       {tab === "settings" && admin && <div className="subnav"><button className={settingsTab === "uploads" ? "active" : ""} onClick={() => setSettingsTab("uploads")}>数据上传</button><button className={settingsTab === "access" ? "active" : ""} onClick={() => setSettingsTab("access")}>访问管理</button></div>}
-      {tab === "tts" && ttsTab !== "health" && <div className="filters"><label>开始日期<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label><label>结束日期<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label><button className="apply" onClick={refresh} disabled={busy}>{busy ? "刷新中…" : "应用日期"}</button></div>}
+      {tab === "tts" && ttsTab !== "health" && ttsTab !== "costs" && <GlobalFilters from={from} to={to} setFrom={setFrom} setTo={setTo} granularity={granularity} setGranularity={setGranularity} product={product} setProduct={setProduct} sku={sku} setSku={setSku} dimensions={dimensions} returnsMode={ttsTab === "returns"} returnType={returnType} setReturnType={setReturnType} returnStatus={returnStatus} setReturnStatus={setReturnStatus} busy={busy} refresh={refresh} />}
       {error && <div className="message error-message">{error}<button onClick={() => setError("")}>×</button></div>}
       {notice && <div className="message success-message">{notice}<button onClick={() => setNotice("")}>×</button></div>}
 
       {tab === "bby" && <PlatformView code="BBY" title="Best Buy Intelligence" description="为 Best Buy 销售、P&L、退货率和库存周转预留统一分析入口。" />}
       {tab === "walmart" && <PlatformView code="WMT" title="Walmart Intelligence" description="为 Walmart 订单、退货、广告和 SKU 经营表现预留统一分析入口。" />}
       {tab === "pricing" && <PlatformView code="PRICE" title="三平台价格核验" description="规划 Amazon、Walmart、Best Buy 的实时售价、基准价和异常提醒。" />}
-      {tab === "tts" && ttsTab === "pnl" && <PnlView data={pnl} admin={admin} onOpenUploads={openUploads} />}
-      {tab === "tts" && ttsTab === "returns" && <ReturnsView data={returns} />}
+      {tab === "tts" && ttsTab === "pnl" && <PnlView data={pnl} admin={admin} onOpenCosts={openCosts} onSkuSelect={setSku} />}
+      {tab === "tts" && ttsTab === "returns" && <ReturnsView data={returns} selectedSku={sku} onSkuSelect={setSku} />}
+      {tab === "tts" && ttsTab === "costs" && <UploadCenter busy={busy} onUpload={upload} onWorkbook={uploadWorkbook} embedded canUpload={admin} />}
       {tab === "tts" && ttsTab === "health" && <SyncView data={sync} admin={admin} busy={busy} onSync={syncNow} />}
+      {tab === "tts" && (ttsTab === "sales" || ttsTab === "marketing") && <LightweightView type={ttsTab} pnl={pnl} />}
       {tab === "settings" && !admin && <section className="panel access"><Empty>设置仅对 Hazel 管理员开放。</Empty></section>}
-      {tab === "settings" && admin && settingsTab === "uploads" && <UploadCenter busy={busy} onUpload={upload} />}
+      {tab === "settings" && admin && settingsTab === "uploads" && <UploadCenter busy={busy} onUpload={upload} onWorkbook={uploadWorkbook} canUpload />}
       {tab === "settings" && admin && settingsTab === "access" && <AccessView admin={admin} items={items} newEmail={newEmail} setNewEmail={setNewEmail} update={updateAccess} />}
     </section>
   </main>;
 }
 
-function Kpi({ label, value, note, tone }: { label: string; value: string; note: string; tone?: string }) {
-  return <article className={`kpi ${tone || ""}`}><p>{label}</p><strong>{value}</strong><small>{note}</small></article>;
+function GlobalFilters(props: {
+  from: string; to: string; setFrom: (v: string) => void; setTo: (v: string) => void; granularity: Granularity;
+  setGranularity: (v: Granularity) => void; product: string; setProduct: (v: string) => void; sku: string; setSku: (v: string) => void;
+  dimensions: Dimensions; returnsMode: boolean; returnType: string; setReturnType: (v: string) => void; returnStatus: string;
+  setReturnStatus: (v: string) => void; busy: boolean; refresh: () => Promise<void>;
+}) {
+  return <div className="filters global-filters">
+    <label>Date From<input type="date" value={props.from} onChange={(event) => props.setFrom(event.target.value)} /></label>
+    <label>Date To<input type="date" value={props.to} onChange={(event) => props.setTo(event.target.value)} /></label>
+    <label>Granularity<select value={props.granularity} onChange={(event) => props.setGranularity(event.target.value as Granularity)}><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option></select></label>
+    <label>Product<select value={props.product} onChange={(event) => { props.setProduct(event.target.value); props.setSku("ALL"); }}><option value="ALL">All Products</option>{props.dimensions.products.map((value) => <option key={value}>{value}</option>)}</select></label>
+    <label>SKU<select value={props.sku} onChange={(event) => props.setSku(event.target.value)}><option value="ALL">All SKUs</option>{props.dimensions.skus.map((value) => <option key={value}>{value}</option>)}</select></label>
+    {props.returnsMode && <><label>Return Type<select value={props.returnType} onChange={(event) => props.setReturnType(event.target.value)}><option value="ALL">All Types</option>{props.dimensions.returnTypes?.map((value) => <option key={value}>{value}</option>)}</select></label><label>Return Status<select value={props.returnStatus} onChange={(event) => props.setReturnStatus(event.target.value)}><option value="ALL">All Statuses</option>{props.dimensions.returnStatuses?.map((value) => <option key={value}>{value}</option>)}</select></label></>}
+    <button className="apply" onClick={() => void props.refresh()} disabled={props.busy}>{props.busy ? "Refreshing…" : "Apply"}</button>
+  </div>;
+}
+
+function Kpi({ label, value, note, tone, source }: { label: string; value: string; note: string; tone?: string; source?: string }) {
+  return <article className={`kpi ${tone || ""}`} title={source ? `${label}\nSource: ${source}` : undefined}><p>{label}{source && <span className="info-dot">i</span>}</p><strong>{value}</strong><small>{note}</small></article>;
 }
 
 function Empty({ children }: { children: React.ReactNode }) { return <div className="empty"><span>∅</span><strong>暂无数据</strong><small>{children}</small></div>; }
@@ -142,55 +216,158 @@ function PlatformView({ code, title, description }: { code: string; title: strin
   return <section className="platform-view"><article className="panel platform-hero"><span>{code}</span><p className="kicker">MODULE ROADMAP</p><h2>{title}</h2><p>{description}</p><small>当前阶段优先完成 TTS；此入口保留真实数据接入位置，不展示模拟数字。</small></article><div className="roadmap-grid">{roadmap.map((item, index) => <article className="panel" key={item}><i>0{index + 1}</i><strong>{item}</strong><small>READY FOR DATA MAPPING</small></article>)}</div></section>;
 }
 
-function PnlView({ data, admin, onOpenUploads }: { data: PnlData; admin: boolean; onOpenUploads: () => void }) {
-  const maxProfit = Math.max(...data.months.map((row) => Math.abs(row.operatingProfit)), 1);
+function PnlView({ data, admin, onOpenCosts, onSkuSelect }: { data: PnlData; admin: boolean; onOpenCosts: () => void; onSkuSelect: (sku: string) => void }) {
+  const total = data.total;
+  const costMetrics = [
+    ["Refunds", total.refunds, "TikTok Finance + Returns API"], ["TikTok Fees", total.tiktokFees, "TikTok Finance API; Affiliate excluded"],
+    ["Shipping Cost", total.sellerShippingCost, "TikTok Finance API seller-paid shipping"], ["Affiliate Commission", total.affiliateCommission, "TikTok Finance API"],
+    ["Ad Spend", total.adSpend, "API for Business / uploaded manual cost"], ["Product Cost", total.cogs, "Uploaded effective-date Product Cost"],
+    ["Video Agency Fee", total.videoAgencyFees, "Uploaded Agency Fee Rule"], ["LIVE Agency Fee", total.liveAgencyFees, "Uploaded Agency Fee Rule"],
+    ["Return Shipping Cost", total.returnShippingCost, total.estimatedReturnShipping ? "Estimated from returned units × uploaded per-unit rule" : "TikTok Finance actual"],
+    ["Other Cost", total.otherCosts, "Uploaded Manual Costs / Other rules"],
+  ] as const;
   return <>
-    <div className="kpi-grid">
-      <Kpi label="NET REVENUE" value={money.format(data.total.revenue)} note={`${number.format(data.total.units)} units`} />
-      <Kpi label="PRODUCT COST" value={money.format(data.total.cogs)} note="SKU 成本 × 销售数量" />
-      <Kpi label="AGENCY FEES" value={money.format(data.total.agencyFees)} note="Video + LIVE" />
-      <Kpi label="OPERATING PROFIT" value={money.format(data.total.operatingProfit)} note={`${data.total.margin.toFixed(1)}% margin`} tone={data.total.operatingProfit < 0 ? "negative" : "positive"} />
+    <div className="kpi-grid executive-kpis">
+      <Kpi label="GMV" value={money.format(total.gmv)} note={`${data.range.from} — ${data.range.to}`} source="TikTok Orders API" />
+      <Kpi label="ORDERS" value={number.format(total.orders)} note="Valid paid orders" source="TikTok Orders API; canceled/unpaid excluded" />
+      <Kpi label="UNITS SOLD" value={number.format(total.units)} note="Valid order line quantity" source="TikTok Orders API" />
+      <Kpi label="NET REVENUE" value={money.format(total.netRevenue)} note="GMV − refunds − fees − seller shipping" source="Orders + TikTok Finance API" />
+      <Kpi label="OPERATING PROFIT" value={money.format(total.operatingProfit)} note="After all management costs" tone={total.operatingProfit < 0 ? "negative" : "positive"} source="Management P&L formula" />
+      <Kpi label="OPERATING MARGIN" value={`${total.margin.toFixed(1)}%`} note="Operating Profit ÷ Net Revenue" tone={total.margin < 0 ? "negative" : "positive"} source="Calculated management metric" />
+    </div>
+    <div className="cost-strip">{costMetrics.map(([label, value, source]) => <article key={label} title={`Source: ${source}`}><span>{label}<i>i</i></span><strong>{money.format(value)}</strong><small>{percentOf(value, total.gmv)}</small></article>)}</div>
+
+    <section className="panel chart-panel primary-chart"><div className="section-head"><div><p className="kicker">REVENUE / PROFIT / ORDERS</p><h2>Revenue, Profit & Orders Trend</h2><small>GMV、Net Revenue、Operating Profit 使用左轴；Orders 使用右轴。</small></div><span className="range-badge">{data.granularity.toUpperCase()}</span></div>{data.trend.length ? <TrendChart rows={data.trend} /> : <Empty>当前筛选条件下没有销售记录。</Empty>}</section>
+
+    <div className="dashboard-grid two-up">
+      <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">P&L BRIDGE</p><h2>Profit Waterfall</h2></div></div><Waterfall total={total} /></section>
+      <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">COST MIX</p><h2>Cost Composition Over Time</h2></div></div><CostComposition rows={data.trend} /></section>
     </div>
 
-    <div className="content-grid">
-      <section className="panel pnl-chart"><div className="section-head"><div><p className="kicker">MONTHLY P&L</p><h2>经营利润趋势</h2></div><span className="range-badge">{data.range.from} — {data.range.to}</span></div>
-        {!data.months.length ? <Empty>同步 TikTok API 后，这里会显示每月净销售额与利润。</Empty> : <div className="profit-bars">{data.months.map((row) => <div className="profit-column" key={row.key}><strong>{money.format(row.operatingProfit)}</strong><div><i className={row.operatingProfit < 0 ? "loss" : ""} style={{ height: `${Math.max(8, Math.abs(row.operatingProfit) / maxProfit * 100)}%` }} /></div><span>{row.key}</span></div>)}</div>}
-      </section>
-      <section className="panel formula"><p className="kicker">CALCULATION</p><h2>当前利润口径</h2><div className="formula-line"><span>Net Revenue</span><b>API 净销售额</b></div><div className="formula-line minus"><span>− Product Cost</span><b>SKU × 数量</b></div><div className="formula-line minus"><span>− TikTok Fees</span><b>Finance API</b></div><div className="formula-line minus"><span>− Shipping Cost</span><b>Finance API</b></div><div className="formula-line minus"><span>− Agency Fees</span><b>手工模板</b></div><div className="formula-total"><span>= Operating Profit</span><b>{money.format(data.total.operatingProfit)}</b></div><small>SKU 维度的月度 Agency Fee 按该月各 SKU 净销售额占比分摊。</small></section>
-    </div>
+    <section className="panel chart-panel sku-profitability"><div className="section-head"><div><p className="kicker">SKU PROFITABILITY</p><h2>SKU Profit Ranking</h2><small>点击 SKU 可筛选整个 Dashboard。</small></div></div><SkuProfitability rows={data.skus} onSelect={onSkuSelect} /></section>
+    <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">MARKETING EFFICIENCY</p><h2>Marketing Spend & Efficiency</h2><small>Ad Spend、Affiliate、Video 与 LIVE 分开呈现；ROAS 待 API for Business 接入后启用。</small></div></div><MarketingChart rows={data.trend} /></section>
 
-    {admin && <section className="panel upload-section upload-reserved"><div><p className="kicker">P&L INPUT STATUS</p><h2>成本与费用上传区</h2><small>Product Cost、Video Agency Fee、LIVE Agency Fee 的实际上传集中在“设置 → 数据上传”。</small></div><div className="input-statuses"><span>Product Cost</span><span>Video Agency Fee</span><span>LIVE Agency Fee</span></div><button className="apply" onClick={onOpenUploads}>前往数据上传</button></section>}
-
-    <section className="panel data-table"><div className="section-head"><div><p className="kicker">SKU CONTRIBUTION</p><h2>SKU 利润明细</h2></div></div>{!data.skus.length ? <Empty>尚无可计算的 SKU 销售记录。</Empty> : <div className="table-scroll"><table><thead><tr><th>SKU</th><th>Units</th><th>Net Revenue</th><th>Product Cost</th><th>TikTok + Shipping</th><th>Agency Fee</th><th>Operating Profit</th><th>Margin</th></tr></thead><tbody>{data.skus.map((row) => <tr key={row.key}><td><strong>{row.key}</strong></td><td>{number.format(row.units)}</td><td>{money.format(row.revenue)}</td><td>{money.format(row.cogs)}</td><td>{money.format(row.platformFees + row.shippingCost)}</td><td>{money.format(row.agencyFees)}</td><td className={row.operatingProfit < 0 ? "red" : "green"}>{money.format(row.operatingProfit)}</td><td>{row.margin.toFixed(1)}%</td></tr>)}</tbody></table></div>}</section>
-  </>;
-}
-
-function ReturnsView({ data }: { data: ReturnsData }) {
-  return <>
-    <div className="kpi-grid">
-      <Kpi label="SOLD UNITS" value={number.format(data.soldUnits)} note="所选周期销售数量" />
-      <Kpi label="RETURNED UNITS" value={number.format(data.returnedUnits)} note="排除 rejected / canceled" />
-      <Kpi label="RETURN RATE" value={`${data.returnRate.toFixed(2)}%`} note="Returned Units ÷ Sold Units" tone={data.returnRate > 10 ? "negative" : ""} />
-      <Kpi label="ACTIVE SKUS" value={number.format(data.skuCount)} note="有销售或退货记录" />
-    </div>
-    <section className="panel return-section"><div className="section-head"><div><p className="kicker">SKU RETURN INTELLIGENCE</p><h2>按 SKU 的退货率与原因占比</h2><small>原因占比以每个 SKU 的退货件数为分母。</small></div><span className="range-badge">{data.range.from} — {data.range.to}</span></div>
-      {!data.skus.length ? <Empty>同步 TikTok Return API 后，这里会按 SKU 展示退货率和原因结构。</Empty> : <div className="return-list"><div className="return-header"><span>SKU</span><span>Sold</span><span>Returned</span><span>Return Rate</span><span>Return Reason Mix</span></div>{data.skus.map((row) => <article className="return-row" key={row.sku}><strong>{row.sku}</strong><span>{number.format(row.soldUnits)}</span><span>{number.format(row.returnedUnits)}</span><b className={row.returnRate > 10 ? "rate high" : "rate"}>{row.returnRate.toFixed(2)}%</b><div className="reason-mix">{row.reasons.length ? row.reasons.map((reason) => <div key={reason.reason}><span><b>{reason.reason}</b><em>{reason.share.toFixed(1)}%</em></span><i><u style={{ width: `${reason.share}%` }} /></i></div>) : <small>暂无退货原因</small>}</div></article>)}</div>}
+    <section className="panel formula traceability"><div className="section-head"><div><p className="kicker">MANAGEMENT P&L</p><h2>口径与数据来源</h2></div>{admin && <button className="apply" onClick={onOpenCosts}>Cost Inputs</button>}</div>
+      <div className="formula-grid"><div><span>GMV</span><b>{money.format(total.gmv)}</b></div><div><span>− Refunds</span><b>{money.format(total.refunds)}</b></div><div><span>− TikTok Fees</span><b>{money.format(total.tiktokFees)}</b></div><div><span>− Seller Shipping</span><b>{money.format(total.sellerShippingCost)}</b></div><div className="subtotal"><span>= Net Revenue</span><b>{money.format(total.netRevenue)}</b></div><div><span>− Product / Affiliate / Ads / Agency / Returns / Other</span><b>{money.format(total.netRevenue - total.operatingProfit)}</b></div><div className="total"><span>= Operating Profit</span><b>{money.format(total.operatingProfit)}</b></div></div>
+      <div className="source-list">{data.sources.map((source) => <div key={source.metric}><strong>{source.metric}</strong><span>{source.source}</span><em>{source.status}</em></div>)}</div>
     </section>
   </>;
 }
 
-function UploadCenter({ busy, onUpload }: { busy: boolean; onUpload: (kind: string, event: ChangeEvent<HTMLInputElement>) => void }) {
+function TrendChart({ rows }: { rows: PnlRow[] }) {
+  const width = 920, height = 290, left = 55, right = 35, top = 20, bottom = 38;
+  const dollarMax = Math.max(...rows.flatMap((row) => [row.gmv, row.netRevenue, Math.max(0, row.operatingProfit)]), 1);
+  const orderMax = Math.max(...rows.map((row) => row.orders), 1);
+  const x = (index: number) => left + (rows.length === 1 ? (width - left - right) / 2 : index * (width - left - right) / (rows.length - 1));
+  const yDollar = (value: number) => top + (height - top - bottom) * (1 - Math.max(0, value) / dollarMax);
+  const yOrder = (value: number) => top + (height - top - bottom) * (1 - value / orderMax);
+  const points = (key: "gmv" | "netRevenue" | "operatingProfit") => rows.map((row, index) => `${x(index)},${yDollar(row[key])}`).join(" ");
+  return <div className="svg-chart"><div className="chart-legend"><span className="gmv">GMV</span><span className="net">Net Revenue</span><span className="profit">Operating Profit</span><span className="orders">Orders</span></div><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Revenue Profit Orders Trend">
+    {[0, .25, .5, .75, 1].map((part) => <line key={part} x1={left} x2={width - right} y1={top + part * (height - top - bottom)} y2={top + part * (height - top - bottom)} className="grid-line" />)}
+    {rows.map((row, index) => { const barWidth = Math.max(7, Math.min(24, (width - left - right) / Math.max(rows.length, 1) * .38)); const y = yOrder(row.orders); return <g key={row.key}><rect x={x(index) - barWidth / 2} y={y} width={barWidth} height={height - bottom - y} className="order-bar"><title>{`${row.key}\nGMV ${preciseMoney.format(row.gmv)}\nNet Revenue ${preciseMoney.format(row.netRevenue)}\nOperating Profit ${preciseMoney.format(row.operatingProfit)}\nOrders ${number.format(row.orders)}\nMargin ${row.margin.toFixed(2)}%`}</title></rect>{(rows.length <= 12 || index % Math.ceil(rows.length / 10) === 0) && <text x={x(index)} y={height - 12} textAnchor="middle">{row.key.slice(5)}</text>}</g>; })}
+    <polyline points={points("gmv")} className="line-gmv" /><polyline points={points("netRevenue")} className="line-net" /><polyline points={points("operatingProfit")} className="line-profit" />
+    {rows.map((row, index) => <g key={`dots-${row.key}`}><circle cx={x(index)} cy={yDollar(row.gmv)} r="4" className="dot-gmv"><title>{`${row.key} · GMV ${preciseMoney.format(row.gmv)}`}</title></circle><circle cx={x(index)} cy={yDollar(row.netRevenue)} r="4" className="dot-net"><title>{`${row.key} · Net Revenue ${preciseMoney.format(row.netRevenue)}`}</title></circle><circle cx={x(index)} cy={yDollar(row.operatingProfit)} r="4" className="dot-profit"><title>{`${row.key} · Operating Profit ${preciseMoney.format(row.operatingProfit)} · Margin ${row.margin.toFixed(2)}%`}</title></circle></g>)}
+    <text x="4" y="18" className="axis-label">{money.format(dollarMax)}</text><text x={width - right} y="18" textAnchor="end" className="axis-label">{number.format(orderMax)} orders</text>
+  </svg></div>;
+}
+
+function Waterfall({ total }: { total: PnlRow }) {
+  const steps = [
+    ["GMV", total.gmv, "total"], ["Refunds", -total.refunds, "cost"], ["TikTok Fees", -total.tiktokFees, "cost"],
+    ["Shipping", -total.sellerShippingCost, "cost"], ["Net Revenue", total.netRevenue, "subtotal"], ["Product Cost", -total.cogs, "cost"],
+    ["Affiliate", -total.affiliateCommission, "cost"], ["Ad Spend", -total.adSpend, "cost"], ["Video Agency", -total.videoAgencyFees, "cost"],
+    ["LIVE Agency", -total.liveAgencyFees, "cost"], ["Return Shipping", -total.returnShippingCost, "cost"], ["Other", -total.otherCosts, "cost"],
+    ["Operating Profit", total.operatingProfit, "total"],
+  ] as const;
+  const max = Math.max(...steps.map((step) => Math.abs(step[1])), 1);
+  return <div className="waterfall">{steps.map(([label, value, kind]) => <div key={label} className={kind} title={`${label}\n${value < 0 ? "-" : ""}${preciseMoney.format(Math.abs(value))}\n${percentOf(Math.abs(value), total.gmv)}`}><div><i style={{ height: `${Math.max(5, Math.abs(value) / max * 100)}%` }} /></div><strong>{value < 0 ? "−" : ""}{money.format(Math.abs(value))}</strong><span>{label}</span></div>)}</div>;
+}
+
+const costKeys: { key: keyof PnlRow; label: string }[] = [
+  { key: "tiktokFees", label: "TikTok Fees" }, { key: "sellerShippingCost", label: "Shipping" }, { key: "cogs", label: "COGS" },
+  { key: "affiliateCommission", label: "Affiliate" }, { key: "adSpend", label: "Ads" }, { key: "videoAgencyFees", label: "Video" },
+  { key: "liveAgencyFees", label: "LIVE" }, { key: "returnShippingCost", label: "Return Shipping" }, { key: "otherCosts", label: "Other" },
+];
+
+function CostComposition({ rows }: { rows: PnlRow[] }) {
+  const totals = rows.map((row) => costKeys.reduce((sum, item) => sum + Number(row[item.key] || 0), 0));
+  const max = Math.max(...totals, 1);
+  return <><div className="stack-legend">{costKeys.map((item, index) => <span key={item.key}><i style={{ background: palette[index] }} />{item.label}</span>)}</div><div className="stacked-chart">{rows.map((row, rowIndex) => <div key={row.key}><div style={{ height: `${Math.max(6, totals[rowIndex] / max * 100)}%` }}>{costKeys.map((item, index) => { const value = Number(row[item.key] || 0); return value ? <i key={item.key} style={{ height: `${value / totals[rowIndex] * 100}%`, background: palette[index] }} title={`${row.key} · ${item.label}\n${preciseMoney.format(value)}\n${percentOf(value, row.gmv)}`} /> : null; })}</div><span>{row.key.slice(5)}</span></div>)}</div></>;
+}
+
+function SkuProfitability({ rows, onSelect }: { rows: PnlRow[]; onSelect: (sku: string) => void }) {
+  const [sort, setSort] = useState<"gmv" | "operatingProfit" | "margin">("operatingProfit");
+  const ranked = [...rows].sort((a, b) => b[sort] - a[sort]).slice(0, 20);
+  const max = Math.max(...ranked.map((row) => Math.abs(row[sort])), 1);
+  return <><div className="metric-switch"><button className={sort === "gmv" ? "active" : ""} onClick={() => setSort("gmv")}>GMV</button><button className={sort === "operatingProfit" ? "active" : ""} onClick={() => setSort("operatingProfit")}>Profit</button><button className={sort === "margin" ? "active" : ""} onClick={() => setSort("margin")}>Margin</button></div><div className="rank-bars">{ranked.map((row) => <button key={row.key} onClick={() => onSelect(row.key)} title={`${row.key}\nGMV ${preciseMoney.format(row.gmv)}\nNet Revenue ${preciseMoney.format(row.netRevenue)}\nOperating Profit ${preciseMoney.format(row.operatingProfit)}\nOperating Margin ${row.margin.toFixed(2)}%`}><strong>{row.key}</strong><i><u style={{ width: `${Math.max(1, Math.abs(row[sort]) / max * 100)}%` }} /></i><span>{sort === "margin" ? `${row.margin.toFixed(1)}%` : money.format(row[sort])}</span></button>)}</div></>;
+}
+
+function MarketingChart({ rows }: { rows: PnlRow[] }) {
+  const max = Math.max(...rows.map((row) => row.adSpend + row.affiliateCommission + row.videoAgencyFees + row.liveAgencyFees), 1);
+  return <div className="marketing-chart">{rows.map((row) => { const costs = [row.adSpend, row.affiliateCommission, row.videoAgencyFees, row.liveAgencyFees]; const total = costs.reduce((a, b) => a + b, 0); return <div key={row.key} title={`${row.key}\nAd Spend ${preciseMoney.format(row.adSpend)}\nAffiliate ${preciseMoney.format(row.affiliateCommission)}\nVideo ${preciseMoney.format(row.videoAgencyFees)}\nLIVE ${preciseMoney.format(row.liveAgencyFees)}`}><div style={{ height: `${Math.max(5, total / max * 100)}%` }}>{costs.map((cost, index) => cost ? <i key={index} style={{ height: `${cost / total * 100}%`, background: palette[index + 3] }} /> : null)}</div><span>{row.key.slice(5)}</span></div>; })}</div>;
+}
+
+function ReturnsView({ data, selectedSku, onSkuSelect }: { data: ReturnsData; selectedSku: string; onSkuSelect: (sku: string) => void }) {
+  const selected = selectedSku !== "ALL" ? data.skus.find((row) => row.sku === selectedSku) : undefined;
+  return <>
+    <div className="kpi-grid returns-kpis">
+      <Kpi label="SOLD UNITS" value={number.format(data.soldUnits)} note="Sales cohort denominator" source="TikTok Orders API" />
+      <Kpi label="RETURNED UNITS" value={number.format(data.returnedUnits)} note="Completed physical returns only" source="Returns API; rejected/canceled/pending excluded" />
+      <Kpi label="RETURN RATE" value={`${data.returnRate.toFixed(2)}%`} note="Returned Units ÷ Sold Units" tone={data.returnRate > 10 ? "negative" : ""} source="Sales cohort calculation" />
+      <Kpi label="REFUND AMOUNT" value={money.format(data.refundAmount)} note={`${data.refundGmvRate.toFixed(2)}% of cohort GMV`} source="TikTok Returns / Finance API" />
+      <Kpi label="REFUND GMV RATE" value={`${data.refundGmvRate.toFixed(2)}%`} note="Refund Amount ÷ cohort GMV" source="Orders + Returns API" />
+      <Kpi label="RETURN SHIPPING" value={money.format(data.returnShippingCost)} note="Actual or per-unit fallback" source="Finance actual; uploaded rule fallback" />
+      <Kpi label="ACTIVE SKUS" value={number.format(data.skuCount)} note={`${number.format(data.returnsCreatedDuringPeriod)} returns created in period`} source="Orders + Returns API" />
+    </div>
+    <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SKU RETURN RISK</p><h2>Return Rate by SKU</h2><small>按销售 cohort 计算；点击 SKU 可钻取全部 R&R 图表。</small></div><button className="clear-filter" onClick={() => onSkuSelect("ALL")}>All SKUs</button></div><ReturnRateBars rows={data.skus} onSelect={onSkuSelect} /></section>
+    <div className="dashboard-grid two-up">
+      <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">RETURN TREND</p><h2>{selected ? `${selected.sku} Return Trend` : "Select a SKU"}</h2></div></div>{selected ? <ReturnTrend rows={selected.trend} /> : <Empty>从 Return Rate by SKU 图中选择一个 SKU。</Empty>}</section>
+      <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">REASON DISTRIBUTION</p><h2>{selected ? `${selected.sku} Return Reasons` : "Reason Mix by SKU"}</h2></div></div><ReasonDistribution skus={data.skus} selected={selected} /></section>
+    </div>
+    <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">REASON TREND</p><h2>Return Reason Trend</h2><small>原因变化按原订单销售 cohort 的日期粒度展示。</small></div></div>{selected ? <ReasonTrend rows={selected.reasonTrend} /> : <Empty>选择一个 SKU 后查看原因趋势。</Empty>}</section>
+    <section className="panel source-panel"><div className="section-head"><div><p className="kicker">TRACEABILITY</p><h2>R&R 数据来源</h2></div></div><div className="source-list">{data.sources.map((source) => <div key={source.metric}><strong>{source.metric}</strong><span>{source.source}</span></div>)}</div></section>
+  </>;
+}
+
+function ReturnRateBars({ rows, onSelect }: { rows: ReturnSku[]; onSelect: (sku: string) => void }) {
+  const max = Math.max(...rows.map((row) => row.returnRate), 1);
+  return <div className="return-rate-bars">{rows.slice(0, 30).map((row) => <button key={row.sku} onClick={() => onSelect(row.sku)} title={`SKU: ${row.sku}\nSold Units ${number.format(row.soldUnits)}\nReturned Units ${number.format(row.returnedUnits)}\nReturn Rate ${row.returnRate.toFixed(2)}%\nRefund Amount ${preciseMoney.format(row.refundAmount)}\nTop Return Reason ${row.reasons[0]?.reason || "None"}`}><strong>{row.sku}</strong><i><u style={{ width: `${row.returnRate / max * 100}%` }} /></i><span>{row.returnRate.toFixed(2)}%</span></button>)}</div>;
+}
+
+function ReturnTrend({ rows }: { rows: ReturnSku["trend"] }) {
+  const maxUnits = Math.max(...rows.flatMap((row) => [row.soldUnits, row.returnedUnits]), 1);
+  const maxRate = Math.max(...rows.map((row) => row.returnRate), 1);
+  return <div className="return-trend">{rows.map((row) => <div key={row.key} title={`${row.key}\nSold ${row.soldUnits}\nReturned ${row.returnedUnits}\nReturn Rate ${row.returnRate.toFixed(2)}%`}><span className="rate-line" style={{ bottom: `${row.returnRate / maxRate * 75 + 15}%` }}>{row.returnRate.toFixed(1)}%</span><div className="unit-bars"><i style={{ height: `${row.soldUnits / maxUnits * 100}%` }} /><i style={{ height: `${row.returnedUnits / maxUnits * 100}%` }} /></div><small>{row.key.slice(5)}</small></div>)}</div>;
+}
+
+function ReasonDistribution({ skus, selected }: { skus: ReturnSku[]; selected?: ReturnSku }) {
+  if (selected) return <div className="reason-ranked">{selected.reasons.map((reason) => <div key={reason.reason} title={`${reason.reason}\nReturned Units ${reason.count}\n${reason.share.toFixed(2)}% of SKU returns\nRefund Amount ${preciseMoney.format(reason.refundAmount)}`}><span><strong>{reason.reason}</strong><em>{reason.count} · {reason.share.toFixed(1)}%</em></span><i><u style={{ width: `${reason.share}%` }} /></i></div>)}</div>;
+  return <div className="reason-stack-list">{skus.filter((row) => row.returnedUnits).slice(0, 18).map((row) => <div key={row.sku}><strong>{row.sku}</strong><span>{row.reasons.map((reason, index) => <i key={reason.reason} style={{ width: `${reason.share}%`, background: palette[index % palette.length] }} title={`${row.sku} · ${reason.reason}\n${reason.count} units · ${reason.share.toFixed(2)}%`} />)}</span></div>)}</div>;
+}
+
+function ReasonTrend({ rows }: { rows: ReturnSku["reasonTrend"] }) {
+  const reasons = [...new Set(rows.flatMap((row) => row.reasons.map((reason) => reason.reason)))];
+  return <><div className="stack-legend">{reasons.map((reason, index) => <span key={reason}><i style={{ background: palette[index % palette.length] }} />{reason}</span>)}</div><div className="reason-trend">{rows.map((row) => <div key={row.key}><span>{row.reasons.map((reason) => <i key={reason.reason} style={{ height: `${reason.share}%`, background: palette[reasons.indexOf(reason.reason) % palette.length] }} title={`${row.key} · ${reason.reason}\n${reason.count} units · ${reason.share.toFixed(2)}%`} />)}</span><small>{row.key.slice(5)}</small></div>)}</div></>;
+}
+
+function UploadCenter({ busy, onUpload, onWorkbook, embedded = false, canUpload }: { busy: boolean; onUpload: (kind: string, event: ChangeEvent<HTMLInputElement>) => void; onWorkbook: (event: ChangeEvent<HTMLInputElement>) => void; embedded?: boolean; canUpload: boolean }) {
   const cards = [
-    ["product_cost", "Product Cost", "按 SKU + 生效日维护单位产品成本", "/templates/product-cost.csv"],
-    ["video_agency_fee", "Video Agency Fee", "按月维护短视频 Agency Fee", "/templates/video-agency-fee.csv"],
-    ["live_agency_fee", "LIVE Agency Fee", "按月维护直播 Agency Fee", "/templates/live-agency-fee.csv"],
+    ["product_cost", "Product Cost", "有效期成本；历史成本不会被新成本覆盖", "/templates/product-cost.csv"],
+    ["agency_fee_rules", "Agency Fee Rules", "Video / LIVE / Creator / Other，多种计算方法", "/templates/agency-fee-rules.csv"],
+    ["return_shipping_cost", "Return Shipping Cost", "ALL 默认值 + SKU 覆盖值", "/templates/return-shipping-cost.csv"],
+    ["manual_costs", "Manual Costs", "广告、样品、一次性费用与手工调整", "/templates/manual-costs.csv"],
   ];
-  return <section className="panel upload-center"><div className="section-head"><div><p className="kicker">SETTINGS / DATA UPLOAD</p><h2>TTS 成本与费用数据</h2><small>下载标准 CSV，填写后上传；同一 SKU/月份的新文件会覆盖旧值并自动重算 P&amp;L。</small></div><span className="owner">仅 Hazel 可上传</span></div><div className="upload-grid">{cards.map(([kind, title, description, template]) => <article className="upload-card" key={kind}><span>CSV</span><div><strong>{title}</strong><small>{description}</small></div><div className="upload-actions"><a href={template} download>下载模板</a><label className={busy ? "disabled" : ""}>上传文件<input type="file" accept=".csv,text/csv" disabled={busy} onChange={(event) => onUpload(kind, event)} /></label></div></article>)}</div><div className="upload-note"><strong>TikTok 自动数据</strong><span>销售、Finance、Returns 由 Worker 定时同步，无需手工上传。</span></div></section>;
+  return <section className="panel upload-center"><div className="section-head"><div><p className="kicker">{embedded ? "TTS / COST INPUTS" : "SETTINGS / DATA UPLOAD"}</p><h2>Management Cost Rules</h2><small>上传后按生效日期和 SKU 自动重算；同一规则键更新，不覆盖其他历史期间。</small></div><span className="owner">仅 Hazel 可上传</span></div><article className="workbook-upload"><div><span>XLSX</span><strong>Phase 1 Cost Inputs Workbook</strong><small>一个工作簿包含 Product Cost、Agency Fee Rules、Return Shipping Cost、Manual Costs 四个 Sheet。</small></div><div><a href="/templates/tts-cost-inputs.xlsx" download>下载 Excel 模板</a>{canUpload && <label className={busy ? "disabled" : ""}>上传 Excel<input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" disabled={busy} onChange={onWorkbook} /></label>}</div></article><div className="upload-grid cost-upload-grid">{cards.map(([kind, title, description, template]) => <article className="upload-card" key={kind}><span>CSV</span><div><strong>{title}</strong><small>{description}</small></div><div className="upload-actions"><a href={template} download>下载单表 CSV</a>{canUpload && <label className={busy ? "disabled" : ""}>上传 CSV<input type="file" accept=".csv,text/csv" disabled={busy} onChange={(event) => onUpload(kind, event)} /></label>}</div></article>)}</div>{!canUpload && <div className="upload-note"><strong>只读模式</strong><span>你可以下载模板；只有 Hazel 管理员可以上传并修改成本规则。</span></div>}<div className="integrity-rules"><strong>Phase 1 数据完整性</strong><span>Affiliate 不重复计入 TikTok Fees</span><span>Buyer-paid shipping 不作卖家成本</span><span>Rejected / Canceled / Pending 不计物理退货</span><span>Actual Return Shipping 优先于估算</span></div></section>;
 }
 
 function SyncView({ data, admin, busy, onSync }: { data: SyncData; admin: boolean; busy: boolean; onSync: () => void }) {
-  const last = data.lastRun;
-  return <section className="sync-layout"><article className="panel sync-hero"><p className="kicker">TIKTOK SHOP OPEN API</p><h2>{data.configured ? "自动数据管道已就绪" : "还差 TikTok API 凭证"}</h2><p>{data.configured ? "Cloudflare Worker 每 6 小时拉取订单、退货和 SKU 级财务结算，并写入 D1。" : "在 Cloudflare Secrets 中加入 App Key、App Secret、Access Token 与 Shop Cipher 后即可启用。"}</p>{admin && <button className="primary-action" onClick={onSync} disabled={busy || !data.configured}>{busy ? "同步中…" : "立即同步最近 30 天"}</button>}</article><article className="panel sync-details"><div><span>Orders API</span><b>202309</b></div><div><span>Returns API</span><b>202602</b></div><div><span>Finance API</span><b>202501</b></div><div><span>Cloudflare Cron</span><b>Every 6 hours</b></div></article><article className="panel sync-run"><p className="kicker">LAST RUN</p>{last ? <><h2 className={last.status === "success" ? "green" : last.status === "failed" ? "red" : ""}>{last.status.toUpperCase()}</h2><p>{last.message}</p><div><span>销售行</span><b>{last.ordersUpserted}</b></div><div><span>退货行</span><b>{last.returnsUpserted}</b></div><small>{new Date(last.startedAt).toLocaleString("zh-CN")}</small></> : <Empty>尚未执行过 TikTok 同步。</Empty>}</article></section>;
+  const last = data.lastRun; const counts = data.counts;
+  return <section className="sync-layout"><article className="panel sync-hero"><p className="kicker">TIKTOK SHOP OPEN API</p><h2>{data.configured ? "自动数据管道已就绪" : "还差 TikTok API 凭证"}</h2><p>{data.configured ? "Cloudflare Worker 每 6 小时拉取订单、退货和 SKU 级财务结算，并写入 D1。" : "在 Cloudflare Secrets 中加入 App Key、App Secret、Access Token 与 Shop Cipher 后即可启用。"}</p>{admin && <button className="primary-action" onClick={onSync} disabled={busy || !data.configured}>{busy ? "同步中…" : "立即同步最近 30 天"}</button>}</article><article className="panel sync-details"><div><span>Orders API</span><b>POST · 202309</b></div><div><span>Returns API</span><b>POST · 202602</b></div><div><span>Finance API</span><b>GET · 202501</b></div><div><span>Cloudflare Cron</span><b>Every 6 hours</b></div>{counts && <><div><span>D1 Sales Lines</span><b>{number.format(counts.salesLines)}</b></div><div><span>D1 Return Lines</span><b>{number.format(counts.returnLines)}</b></div></>}</article><article className="panel sync-run"><p className="kicker">LAST RUN</p>{last ? <><h2 className={last.status === "success" ? "green" : last.status === "failed" ? "red" : ""}>{last.status.toUpperCase()}</h2><p>{last.message}</p><div><span>销售行</span><b>{last.ordersUpserted}</b></div><div><span>退货行</span><b>{last.returnsUpserted}</b></div><small>{new Date(last.startedAt).toLocaleString("zh-CN")}</small></> : <Empty>尚未执行过 TikTok 同步。</Empty>}</article>{counts && <article className="panel sync-run"><p className="kicker">COST RULE COVERAGE</p><div><span>Product Cost</span><b>{counts.productCostRules}</b></div><div><span>Agency Rules</span><b>{counts.agencyRules}</b></div><div><span>Return Shipping</span><b>{counts.returnShippingRules}</b></div><div><span>Manual Costs</span><b>{counts.manualCosts}</b></div></article>}</section>;
+}
+
+function LightweightView({ type, pnl }: { type: "sales" | "marketing"; pnl: PnlData }) {
+  if (type === "sales") return <section className="panel lightweight"><p className="kicker">SALES & ORDERS</p><h2>订单活动概览</h2><div className="kpi-grid"><Kpi label="GMV" value={money.format(pnl.total.gmv)} note="Current filters" /><Kpi label="Orders" value={number.format(pnl.total.orders)} note="Valid paid orders" /><Kpi label="Units" value={number.format(pnl.total.units)} note="Valid sold units" /></div><TrendChart rows={pnl.trend} /></section>;
+  return <section className="panel lightweight"><p className="kicker">MARKETING</p><h2>Marketing Cost Overview</h2><p>Phase 1 先展示 Finance Affiliate 与上传的 Agency / Ad Cost；TikTok API for Business 接入后补全 billed cost、attributed GMV 与 ROAS。</p><MarketingChart rows={pnl.trend} /></section>;
 }
 
 function AccessView({ admin, items, newEmail, setNewEmail, update }: { admin: boolean; items: Allowed[]; newEmail: string; setNewEmail: (value: string) => void; update: (method: "POST" | "DELETE", target: string) => void }) {

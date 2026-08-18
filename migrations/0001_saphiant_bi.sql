@@ -79,6 +79,38 @@ CREATE TABLE IF NOT EXISTS period_expenses (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_period_expense_month_kind ON period_expenses(month, kind);
 
+CREATE TABLE IF NOT EXISTS product_cost_rules (
+  id TEXT PRIMARY KEY, seller_sku TEXT NOT NULL, product_name TEXT NOT NULL DEFAULT '', unit_cost REAL NOT NULL,
+  effective_from TEXT NOT NULL, effective_to TEXT, notes TEXT NOT NULL DEFAULT '', import_id TEXT, updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_product_cost_rule ON product_cost_rules(seller_sku,effective_from);
+
+CREATE TABLE IF NOT EXISTS agency_fee_rules (
+  id TEXT PRIMARY KEY, fee_name TEXT NOT NULL, fee_category TEXT NOT NULL, scope_type TEXT NOT NULL,
+  scope_value TEXT NOT NULL DEFAULT 'ALL', calculation_method TEXT NOT NULL, rate_amount REAL NOT NULL,
+  effective_from TEXT NOT NULL, effective_to TEXT, notes TEXT NOT NULL DEFAULT '', import_id TEXT, updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS return_shipping_rules (
+  id TEXT PRIMARY KEY, seller_sku TEXT NOT NULL, cost_per_unit REAL NOT NULL,
+  effective_from TEXT NOT NULL, effective_to TEXT, import_id TEXT, updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_return_shipping_rule ON return_shipping_rules(seller_sku,effective_from);
+
+CREATE TABLE IF NOT EXISTS manual_costs (
+  id TEXT PRIMARY KEY, period TEXT NOT NULL, cost_category TEXT NOT NULL, seller_sku TEXT NOT NULL DEFAULT 'ALL',
+  amount REAL NOT NULL, notes TEXT NOT NULL DEFAULT '', import_id TEXT, updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS finance_line_costs (
+  sales_line_id TEXT PRIMARY KEY, return_shipping_actual REAL NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS raw_finance_transactions (
+  id TEXT PRIMARY KEY, order_id TEXT NOT NULL, line_item_id TEXT NOT NULL DEFAULT '', sku TEXT NOT NULL DEFAULT '',
+  raw_json TEXT NOT NULL, updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS import_runs (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,
