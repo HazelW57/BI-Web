@@ -322,6 +322,29 @@ export async function syncFinanceBatch(env: BiEnv, limit = 25) {
     errors: results.filter((row) => row.status === "ERROR").length, remaining: remaining?.count || 0 };
 }
 
+export async function syncFinanceStatements(env: BiEnv, from: string, to: string) {
+  await ensureBiSchema(env.DB); validateConfig(env);
+  const fromSeconds = Math.floor(Date.parse(`${from}T00:00:00Z`) / 1000); const toSeconds = Math.floor(Date.parse(`${to}T00:00:00Z`) / 1000);
+  if (!Number.isFinite(fromSeconds) || !Number.isFinite(toSeconds) || fromSeconds >= toSeconds) throw new Error("Invalid statement window");
+  const path = "/finance/202309/statements"; let pageToken = ""; const rows: JsonRecord[] = []; const seen = new Set<string>();
+  for (let page = 0; page < 200; page += 1) {
+    const data = await tiktokRequest(env, path, { query: { statement_time_ge: String(fromSeconds), statement_time_lt: String(toSeconds),
+      sort_field: "statement_time", sort_order: "ASC", page_size: "100", ...(pageToken ? { page_token: pageToken } : {}) } });
+    rows.push(...asArray(data.statements).map(asRecord)); pageToken = stringValue(data.next_page_token); if (!pageToken) break;
+    if (seen.has(pageToken)) throw new Error("Finance statements returned a repeated page token"); seen.add(pageToken);
+  }
+  const now = Date.now();
+  await runBatches(env.DB, rows.map((row) => env.DB.prepare(`INSERT INTO finance_statements
+    (id,statement_time,payment_status,settlement_amount,revenue_amount,fee_amount,adjustment_amount,shipping_cost_amount,raw_json,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET payment_status=excluded.payment_status,settlement_amount=excluded.settlement_amount,
+    revenue_amount=excluded.revenue_amount,fee_amount=excluded.fee_amount,adjustment_amount=excluded.adjustment_amount,
+    shipping_cost_amount=excluded.shipping_cost_amount,raw_json=excluded.raw_json,updated_at=excluded.updated_at`)
+    .bind(stringValue(row.id, row.statement_id), timestampValue(row.statement_time), stringValue(row.payment_status) || "FINAL",
+      numberValue(row.settlement_amount), numberValue(row.revenue_amount), numberValue(row.fee_amount), numberValue(row.adjustment_amount),
+      numberValue(row.shipping_cost_amount), JSON.stringify(row), now)));
+  return { from, to, statements: rows.length, settlement: rows.reduce((sum, row) => sum + numberValue(row.settlement_amount), 0) };
+}
+
 function validateConfig(env: BiEnv) {
   const missing = [
     ["TIKTOK_APP_KEY", env.TIKTOK_APP_KEY], ["TIKTOK_APP_SECRET", env.TIKTOK_APP_SECRET],
