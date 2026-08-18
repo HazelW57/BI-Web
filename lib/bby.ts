@@ -52,7 +52,7 @@ async function mirakl(env: BbyEnv, store: Store, path: string, params: Record<st
 
 async function runBatches(db:D1Database, statements:D1PreparedStatement[]){for(let index=0;index<statements.length;index+=50)await db.batch(statements.slice(index,index+50));}
 
-async function syncBbyReturnReasons(env:BbyEnv,store:Store,from:string,to:string){
+export async function syncBbyReturnReasons(env:BbyEnv,store:Store,from:string,to:string){
   const t=tables(store),now=Date.now();
   const catalog=await mirakl(env,store,"/api/reasons",{locale:"en_US"});
   const catalogRows=((catalog.reasons||catalog.data||[]) as Obj[]).filter(reason=>s(reason.code));
