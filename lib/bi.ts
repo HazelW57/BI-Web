@@ -343,6 +343,17 @@ function distribute(rows: PnlAccumulator[], amount: number, category: string) {
   for (const row of rows) addCost(row, category, amount * (total ? Math.max(0, row.gmv) / total : 1 / rows.length));
 }
 
+function normalizedReturnReason(raw: string) {
+  const value = raw.toLowerCase();
+  if (/damage|broken|defect|quality|not work/.test(value)) return "Damaged / Defective";
+  if (/wrong|incorrect|missing|not as described/.test(value)) return "Wrong / Missing Item";
+  if (/late|deliver|shipping/.test(value)) return "Delivery Issue";
+  if (/fit|size|large|small/.test(value)) return "Fit / Compatibility";
+  if (/no longer|change.*mind|unwanted|accident/.test(value)) return "Changed Mind / Not Needed";
+  if (/performance|expect|function/.test(value)) return "Performance / Expectation";
+  return "Other";
+}
+
 export function calculatePnl(
   sales: SalesFact[],
   costs: CostFact[],
@@ -462,7 +473,7 @@ export function calculateReturns(
   const salesByOrderSku = new Map(validSales.map((line) => [`${line.orderId}:${line.sku}`, line]));
   const rows = new Map<string, {
     sku: string; productName: string; soldUnits: number; gmv: number; returnedUnits: number; refundAmount: number;
-    returnShippingCost: number; reasons: Map<string, { count: number; refundAmount: number }>;
+    returnShippingCost: number; reasons: Map<string, { count: number; refundAmount: number; rawReasons: Map<string, number> }>;
     trend: Map<string, { key: string; soldUnits: number; returnedUnits: number; returnRate: number }>;
     reasonTrend: Map<string, Map<string, number>>;
   }>();
@@ -481,9 +492,9 @@ export function calculateReturns(
     if (physicalReturn(item.returnType)) {
       row.returnedUnits += item.quantity;
       if (sale) row.returnShippingCost += item.quantity * matchingReturnShipping(returnShippingRules, item.sku, sale.orderedAt);
-      const reason = item.reason || "未分类";
-      const reasonRow = row.reasons.get(reason) ?? { count: 0, refundAmount: 0 };
-      reasonRow.count += item.quantity; reasonRow.refundAmount += refund; row.reasons.set(reason, reasonRow);
+      const rawReason = item.reason || "Unclassified"; const reason = normalizedReturnReason(rawReason);
+      const reasonRow = row.reasons.get(reason) ?? { count: 0, refundAmount: 0, rawReasons: new Map<string, number>() };
+      reasonRow.count += item.quantity; reasonRow.refundAmount += refund; reasonRow.rawReasons.set(rawReason, (reasonRow.rawReasons.get(rawReason) || 0) + item.quantity); row.reasons.set(reason, reasonRow);
       if (sale) {
         const key = bucketString(sale.orderedAt, granularity);
         const point = row.trend.get(key) ?? { key, soldUnits: 0, returnedUnits: 0, returnRate: 0 };
@@ -498,7 +509,7 @@ export function calculateReturns(
     returnRate: row.soldUnits ? round(row.returnedUnits / row.soldUnits * 100) : 0,
     refundAmount: round(row.refundAmount), refundGmvRate: row.gmv ? round(row.refundAmount / row.gmv * 100) : 0,
     returnShippingCost: round(row.returnShippingCost),
-    reasons: [...row.reasons.entries()].map(([reason, value]) => ({ reason, count: value.count, refundAmount: round(value.refundAmount), share: row.returnedUnits ? round(value.count / row.returnedUnits * 100) : 0 })).sort((a, b) => b.count - a.count),
+    reasons: [...row.reasons.entries()].map(([reason, value]) => ({ reason, count: value.count, refundAmount: round(value.refundAmount), share: row.returnedUnits ? round(value.count / row.returnedUnits * 100) : 0, rawReasons: [...value.rawReasons.entries()].map(([raw, count]) => ({ reason: raw, count })).sort((a, b) => b.count - a.count) })).sort((a, b) => b.count - a.count),
     trend: [...row.trend.values()].map((point) => ({ ...point, returnRate: point.soldUnits ? round(point.returnedUnits / point.soldUnits * 100) : 0 })).sort((a, b) => a.key.localeCompare(b.key)),
     reasonTrend: [...row.reasonTrend.entries()].map(([key, reasons]) => {
       const total = [...reasons.values()].reduce((sum, count) => sum + count, 0);

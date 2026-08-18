@@ -14,7 +14,7 @@ type PnlRow = {
 type Source = { metric: string; source: string; status?: string };
 type Dimensions = { products: string[]; skus: string[]; returnTypes?: string[]; returnStatuses?: string[] };
 type PnlData = { range: { from: string; to: string }; granularity: string; dimensions: Dimensions; total: PnlRow; trend: PnlRow[]; months: PnlRow[]; skus: PnlRow[]; sources: Source[]; financeCoverage?: { mappedLines: number; totalLines: number; percent: number; statementCount: number; settlementSummary: boolean; status: string } };
-type Reason = { reason: string; count: number; share: number; refundAmount: number };
+type Reason = { reason: string; count: number; share: number; refundAmount: number; rawReasons?: { reason: string; count: number }[] };
 type ReturnSku = {
   sku: string; productName: string; soldUnits: number; returnedUnits: number; returnRate: number; refundAmount: number;
   refundGmvRate: number; returnShippingCost: number; reasons: Reason[];
@@ -61,7 +61,9 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
   const [returnType, setReturnType] = useState("ALL");
   const [returnStatus, setReturnStatus] = useState("ALL");
   const [pnl, setPnl] = useState<PnlData>(emptyPnl);
+  const [previousPnl, setPreviousPnl] = useState<PnlData>(emptyPnl);
   const [returns, setReturns] = useState<ReturnsData>(emptyReturns);
+  const [previousReturns, setPreviousReturns] = useState<ReturnsData>(emptyReturns);
   const [sync, setSync] = useState<SyncData>({ configured: false, lastRun: null });
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -81,10 +83,15 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
     try {
       const query = new URLSearchParams({ from, to, granularity, product, sku, returnType, returnStatus });
       const returnsQuery = new URLSearchParams({ from, to, granularity, product, sku: "ALL", returnType, returnStatus });
-      const [pnlData, returnsData, syncData] = await Promise.all([
-        getJson<PnlData>(`/api/bi/pnl?${query}`), getJson<ReturnsData>(`/api/bi/returns?${returnsQuery}`), getJson<SyncData>("/api/bi/sync"),
+      const start = new Date(`${from}T00:00:00Z`), end = new Date(`${to}T00:00:00Z`); const days = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86_400_000) + 1);
+      const previousToDate = new Date(start.getTime() - 86_400_000), previousFromDate = new Date(previousToDate.getTime() - (days - 1) * 86_400_000);
+      const previousQuery = new URLSearchParams({ from: dateInput(previousFromDate), to: dateInput(previousToDate), granularity, product, sku, returnType, returnStatus });
+      const previousReturnsQuery = new URLSearchParams({ from: dateInput(previousFromDate), to: dateInput(previousToDate), granularity, product, sku: "ALL", returnType, returnStatus });
+      const [pnlData, returnsData, priorPnlData, priorReturnsData, syncData] = await Promise.all([
+        getJson<PnlData>(`/api/bi/pnl?${query}`), getJson<ReturnsData>(`/api/bi/returns?${returnsQuery}`),
+        getJson<PnlData>(`/api/bi/pnl?${previousQuery}`), getJson<ReturnsData>(`/api/bi/returns?${previousReturnsQuery}`), getJson<SyncData>("/api/bi/sync"),
       ]);
-      setPnl(pnlData); setReturns(returnsData); setSync(syncData);
+      setPnl(pnlData); setReturns(returnsData); setPreviousPnl(priorPnlData); setPreviousReturns(priorReturnsData); setSync(syncData);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "数据读取失败"); }
     finally { setBusy(false); }
   }, [from, getJson, granularity, product, returnStatus, returnType, sku, to]);
@@ -178,8 +185,9 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
       {tab === "bby" && <PlatformView code="BBY" title="Best Buy Intelligence" description="为 Best Buy 销售、P&L、退货率和库存周转预留统一分析入口。" />}
       {tab === "walmart" && <PlatformView code="WMT" title="Walmart Intelligence" description="为 Walmart 订单、退货、广告和 SKU 经营表现预留统一分析入口。" />}
       {tab === "pricing" && <PlatformView code="PRICE" title="三平台价格核验" description="规划 Amazon、Walmart、Best Buy 的实时售价、基准价和异常提醒。" />}
-      {tab === "tts" && ttsTab === "pnl" && <PnlView data={pnl} admin={admin} onOpenCosts={openCosts} onSkuSelect={setSku} />}
-      {tab === "tts" && ttsTab === "returns" && <ReturnsView data={returns} selectedSku={sku} onSkuSelect={setSku} />}
+      {busy && !pnl.trend.length && <div className="dashboard-skeleton"><i/><i/><i/><i/><i/><i/></div>}
+      {tab === "tts" && ttsTab === "pnl" && <PnlView data={pnl} previous={previousPnl} admin={admin} onOpenCosts={openCosts} onSkuSelect={setSku} />}
+      {tab === "tts" && ttsTab === "returns" && <ReturnsView data={returns} previous={previousReturns} selectedSku={sku} onSkuSelect={setSku} />}
       {tab === "tts" && ttsTab === "costs" && <UploadCenter busy={busy} onUpload={upload} onWorkbook={uploadWorkbook} embedded canUpload={admin} />}
       {tab === "tts" && ttsTab === "health" && <SyncView data={sync} admin={admin} busy={busy} onSync={syncNow} />}
       {tab === "tts" && (ttsTab === "sales" || ttsTab === "marketing") && <LightweightView type={ttsTab} pnl={pnl} />}
@@ -201,24 +209,34 @@ function GlobalFilters(props: {
     <label>Date To<input type="date" value={props.to} onChange={(event) => props.setTo(event.target.value)} /></label>
     <label>Granularity<select value={props.granularity} onChange={(event) => props.setGranularity(event.target.value as Granularity)}><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option></select></label>
     <label>Product<select value={props.product} onChange={(event) => { props.setProduct(event.target.value); props.setSku("ALL"); }}><option value="ALL">All Products</option>{props.dimensions.products.map((value) => <option key={value}>{value}</option>)}</select></label>
-    <label>SKU<select value={props.sku} onChange={(event) => props.setSku(event.target.value)}><option value="ALL">All SKUs</option>{props.dimensions.skus.map((value) => <option key={value}>{value}</option>)}</select></label>
+    <label>Search SKU<input list="sku-options" value={props.sku === "ALL" ? "" : props.sku} placeholder="All SKUs" onChange={(event) => props.setSku(event.target.value || "ALL")} /><datalist id="sku-options">{props.dimensions.skus.map((value) => <option key={value} value={value} />)}</datalist></label>
     {props.returnsMode && <><label>Return Type<select value={props.returnType} onChange={(event) => props.setReturnType(event.target.value)}><option value="ALL">All Types</option>{props.dimensions.returnTypes?.map((value) => <option key={value}>{value}</option>)}</select></label><label>Return Status<select value={props.returnStatus} onChange={(event) => props.setReturnStatus(event.target.value)}><option value="ALL">All Statuses</option>{props.dimensions.returnStatuses?.map((value) => <option key={value}>{value}</option>)}</select></label></>}
     <button className="apply" onClick={() => void props.refresh()} disabled={props.busy}>{props.busy ? "Refreshing…" : "Apply"}</button>
   </div>;
 }
 
-function Kpi({ label, value, note, tone, source }: { label: string; value: string; note: string; tone?: string; source?: string }) {
-  return <article className={`kpi ${tone || ""}`} title={source ? `${label}\nSource: ${source}` : undefined}><p>{label}{source && <span className="info-dot">i</span>}</p><strong>{value}</strong><small>{note}</small></article>;
+function Kpi({ label, value, note, tone, source, current, previous, spark = [], status }: { label: string; value: string; note: string; tone?: string; source?: string; current?: number; previous?: number; spark?: number[]; status?: "Actual" | "Preliminary" | "Pending" | "Not Mapped" }) {
+  const delta = current !== undefined && previous !== undefined && previous !== 0 ? (current - previous) / Math.abs(previous) * 100 : null;
+  const max = Math.max(...spark, 1), min = Math.min(...spark, 0), span = Math.max(max - min, 1);
+  const points = spark.map((point, index) => `${spark.length < 2 ? 50 : index / (spark.length - 1) * 100},${30 - (point - min) / span * 26}`).join(" ");
+  return <article className={`kpi tip ${tone || ""} ${status ? `status-${status.toLowerCase().replace(" ", "-")}` : ""}`} data-tooltip={source ? `${label}\nSource: ${source}\nStatus: ${status || "Actual"}` : undefined}>
+    <p>{label}{source && <span className="info-dot">i</span>}{status && <em>{status}</em>}</p><strong>{status === "Pending" || status === "Not Mapped" ? status : value}</strong>
+    <div className="kpi-meta"><small>{delta === null ? note : `${delta >= 0 ? "+" : ""}${delta.toFixed(1)}% vs previous period`}</small>{spark.length > 1 && <svg viewBox="0 0 100 32" preserveAspectRatio="none"><polyline points={points} /></svg>}</div>
+  </article>;
 }
 
 function Empty({ children }: { children: React.ReactNode }) { return <div className="empty"><span>∅</span><strong>暂无数据</strong><small>{children}</small></div>; }
+
+function riskSku(rows: ReturnSku[]) {
+  return [...rows].filter(row=>row.soldUnits>=5).sort((a,b)=>(b.returnRate*Math.sqrt(b.returnedUnits))-(a.returnRate*Math.sqrt(a.returnedUnits)))[0] || [...rows].sort((a,b)=>b.returnedUnits-a.returnedUnits)[0];
+}
 
 function PlatformView({ code, title, description }: { code: string; title: string; description: string }) {
   const roadmap = code === "PRICE" ? ["实时售价采集", "基准价对比", "价格异常提醒"] : ["销售与 P&L", "Returns & Refunds", "SKU 经营表现"];
   return <section className="platform-view"><article className="panel platform-hero"><span>{code}</span><p className="kicker">MODULE ROADMAP</p><h2>{title}</h2><p>{description}</p><small>当前阶段优先完成 TTS；此入口保留真实数据接入位置，不展示模拟数字。</small></article><div className="roadmap-grid">{roadmap.map((item, index) => <article className="panel" key={item}><i>0{index + 1}</i><strong>{item}</strong><small>READY FOR DATA MAPPING</small></article>)}</div></section>;
 }
 
-function PnlView({ data, admin, onOpenCosts, onSkuSelect }: { data: PnlData; admin: boolean; onOpenCosts: () => void; onSkuSelect: (sku: string) => void }) {
+function PnlView({ data, previous, admin, onOpenCosts, onSkuSelect }: { data: PnlData; previous: PnlData; admin: boolean; onOpenCosts: () => void; onSkuSelect: (sku: string) => void }) {
   const total = data.total;
   const costMetrics = [
     ["Refunds", total.refunds, "TikTok Finance + Returns API"], ["TikTok Fees", total.tiktokFees, "TikTok Finance API; Affiliate excluded"],
@@ -230,22 +248,26 @@ function PnlView({ data, admin, onOpenCosts, onSkuSelect }: { data: PnlData; adm
   ] as const;
   return <>
     <div className="kpi-grid executive-kpis">
-      <Kpi label="GMV" value={money.format(total.gmv)} note={`${data.range.from} — ${data.range.to}`} source="TikTok Orders API" />
-      <Kpi label="ORDERS" value={number.format(total.orders)} note="Valid paid orders" source="TikTok Orders API; canceled/unpaid excluded" />
-      <Kpi label="UNITS SOLD" value={number.format(total.units)} note="Valid order line quantity" source="TikTok Orders API" />
-      <Kpi label="NET REVENUE" value={money.format(total.netRevenue)} note={`TikTok Settlement · Finance coverage ${data.financeCoverage?.percent ?? 0}%`} source="TikTok Finance API only; missing finance is not estimated as GMV" />
-      <Kpi label="OPERATING PROFIT" value={money.format(total.operatingProfit)} note="After all management costs" tone={total.operatingProfit < 0 ? "negative" : "positive"} source="Management P&L formula" />
-      <Kpi label="PROFIT RATE" value={`${total.margin.toFixed(1)}%`} note="Operating Profit ÷ GMV" tone={total.margin < 0 ? "negative" : "positive"} source="Calculated management metric" />
+      <Kpi label="GMV" value={money.format(total.gmv)} current={total.gmv} previous={previous.total.gmv} spark={data.trend.map(r=>r.gmv)} note={`${data.range.from} — ${data.range.to}`} source="TikTok Orders API" status="Actual" />
+      <Kpi label="ORDERS" value={number.format(total.orders)} current={total.orders} previous={previous.total.orders} spark={data.trend.map(r=>r.orders)} note="Valid paid orders" source="TikTok Orders API; canceled/unpaid excluded" status="Actual" />
+      <Kpi label="UNITS SOLD" value={number.format(total.units)} current={total.units} previous={previous.total.units} spark={data.trend.map(r=>r.units)} note="Valid order line quantity" source="TikTok Orders API" status="Actual" />
+      <Kpi label="NET REVENUE" value={money.format(total.netRevenue)} current={total.netRevenue} previous={previous.total.netRevenue} spark={data.trend.map(r=>r.netRevenue)} note={`Finance coverage ${data.financeCoverage?.percent ?? 0}%`} source="TikTok Finance API only; missing finance is not estimated as GMV" status={data.financeCoverage?.settlementSummary ? "Actual" : "Preliminary"} />
+      <Kpi label="OPERATING PROFIT" value={money.format(total.operatingProfit)} current={total.operatingProfit} previous={previous.total.operatingProfit} spark={data.trend.map(r=>r.operatingProfit)} note="After mapped internal costs" tone={total.operatingProfit < 0 ? "negative" : "positive"} source="Management P&L formula" status={data.financeCoverage?.settlementSummary ? "Preliminary" : "Pending"} />
+      <Kpi label="MARGIN" value={`${total.margin.toFixed(1)}%`} current={total.margin} previous={previous.total.margin} spark={data.trend.map(r=>r.margin)} note="Operating Profit ÷ GMV" tone={total.margin < 0 ? "negative" : "positive"} source="Calculated management metric" status={data.financeCoverage?.settlementSummary ? "Preliminary" : "Pending"} />
     </div>
     {data.financeCoverage?.status !== "complete" && <div className="data-warning"><strong>Finance reconciliation status</strong><span>{data.financeCoverage?.settlementSummary ? `${number.format(data.financeCoverage.statementCount)} Finance statements included in total Net Revenue; ` : ""}{number.format(data.financeCoverage?.mappedLines || 0)} / {number.format(data.financeCoverage?.totalLines || 0)} sales lines have SKU-level Finance mapping. SKU profit/cost remains incomplete until transaction backfill finishes.</span></div>}
     <div className="cost-strip">{costMetrics.map(([label, value, source]) => { const unavailable = !value && (label === "Affiliate Commission" || label === "Ad Spend"); return <article className="tip" data-tooltip={`${label}\n${unavailable ? "Not yet mapped — not treated as zero" : preciseMoney.format(value)}\nSource: ${source}`} key={label}><span>{label}<i>i</i></span><strong>{unavailable ? "Pending" : money.format(value)}</strong><small>{unavailable ? "Awaiting transaction/API mapping" : percentOf(value, total.gmv)}</small></article>; })}</div>
 
+    <div className="dashboard-grid pnl-bridge-grid">
+      <section className="panel chart-panel bridge-panel"><div className="section-head"><div><p className="kicker">TIKTOK NET REVENUE RECONCILIATION</p><h2>GMV → Net Revenue Bridge</h2><small>Finance API deductions / credits；差额不被人工补平。</small></div></div><PlatformBridge total={total} /></section>
+      <section className="panel chart-panel bridge-panel"><div className="section-head"><div><p className="kicker">INTERNAL COSTS</p><h2>Net Revenue → Operating Profit</h2><small>仅扣除 TikTok Net Revenue 尚未包含的内部成本。</small></div></div><InternalCostBridge total={total} /></section>
+    </div>
     <div className="dashboard-grid excel-hero-grid">
       <section className="panel chart-panel primary-chart"><div className="section-head"><div><p className="kicker">BUSINESS PERFORMANCE</p><h2>Revenue & Profit Trend</h2><small>Revenue holds while margin softens · GMV / Net Revenue / Operating Profit / Orders</small></div><span className="range-badge">{data.granularity.toUpperCase()}</span></div>{data.trend.length ? <TrendChart rows={data.trend} /> : <Empty>当前筛选条件下没有销售记录。</Empty>}</section>
       <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">WHERE MONEY WAS SPENT</p><h2>Cost Composition</h2></div></div><CostDonut total={total} /></section>
     </div>
     <div className="dashboard-grid two-up">
-      <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">P&L BRIDGE</p><h2>Profit Waterfall</h2></div></div><Waterfall total={total} /></section>
+      <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">MARGIN / COST RATIO</p><h2>Profit Quality Trend</h2></div></div><RatioTrend rows={data.trend} /></section>
       <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">MARKETING EFFICIENCY</p><h2>Marketing Spend & Efficiency</h2></div></div><MarketingChart rows={data.trend} /></section>
     </div>
     <div className="dashboard-grid excel-hero-grid"><section className="panel chart-panel sku-profitability"><div className="section-head"><div><p className="kicker">WHICH SKU MAKES MONEY</p><h2>Profitability Ranking</h2><small>点击 SKU 可筛选整个 Dashboard。</small></div></div><SkuProfitability rows={data.skus} onSelect={onSkuSelect} /></section><section className="panel chart-panel"><div className="section-head"><div><p className="kicker">MANAGEMENT SIGNALS</p><h2>What Needs Attention</h2></div></div><ManagementSignals total={total} skus={data.skus} /></section></div>
@@ -286,6 +308,31 @@ function Waterfall({ total }: { total: PnlRow }) {
   return <div className="waterfall">{steps.map(([label, value, kind]) => <div key={label} className={`${kind} tip`} data-tooltip={`${label}\n${value < 0 ? "-" : ""}${preciseMoney.format(Math.abs(value))}\n${percentOf(Math.abs(value), total.gmv)}`}><div><i style={{ height: `${Math.max(5, Math.abs(value) / max * 100)}%` }} /></div><strong>{value < 0 ? "−" : ""}{money.format(Math.abs(value))}</strong><span>{label}</span></div>)}</div>;
 }
 
+function Bridge({ startLabel, start, endLabel, end, items }: { startLabel: string; start: number; endLabel: string; end: number; items: { label: string; value: number; status?: string }[] }) {
+  const max = Math.max(Math.abs(start), ...items.map(item => Math.abs(item.value)), Math.abs(end), 1);
+  return <div className="bridge"><div className="bridge-step total tip" data-tooltip={`${startLabel}\n${preciseMoney.format(start)}\n100% starting point`}><i style={{height:`${Math.max(12,Math.abs(start)/max*100)}%`}}/><b>{money.format(start)}</b><span>{startLabel}</span></div>{items.map(item=><div className={`bridge-step ${item.value < 0 ? "deduction" : "credit"} tip`} data-tooltip={`${item.label}\n${item.status || preciseMoney.format(item.value)}\n${percentOf(Math.abs(item.value), start)}`} key={item.label}><i style={{height:`${Math.max(7,Math.abs(item.value)/max*100)}%`}}/><b>{item.status || `${item.value < 0 ? "−" : "+"}${money.format(Math.abs(item.value))}`}</b><small>{percentOf(Math.abs(item.value), start)}</small><span>{item.label}</span></div>)}<div className="bridge-step subtotal tip" data-tooltip={`${endLabel}\n${preciseMoney.format(end)}\n${percentOf(end,start)}`}><i style={{height:`${Math.max(12,Math.abs(end)/max*100)}%`}}/><b>{money.format(end)}</b><span>{endLabel}</span></div></div>;
+}
+
+function PlatformBridge({total}:{total:PnlRow}) {
+  return <Bridge startLabel="GMV" start={total.gmv} endLabel="Net Revenue" end={total.netRevenue} items={[
+    {label:"Refunds",value:-total.refunds},{label:"TikTok Fees",value:-total.tiktokFees},{label:"Shipping",value:-total.sellerShippingCost},
+    {label:"Adjustments / Credits",value:total.adjustments},{label:"Affiliate",value:-total.affiliateCommission,status:total.affiliateCommission ? undefined : "Not Mapped"},
+    {label:"Unmapped Difference",value:total.unmappedDifference,status:total.unmappedDifference ? undefined : undefined},
+  ]}/>;
+}
+
+function InternalCostBridge({total}:{total:PnlRow}) {
+  return <Bridge startLabel="Net Revenue" start={total.netRevenue} endLabel="Operating Profit" end={total.operatingProfit} items={[
+    {label:"COGS",value:-total.cogs,status:total.cogs ? undefined : "Not Mapped"},{label:"Ads",value:-total.adSpend,status:total.adSpend ? undefined : "Not Connected"},
+    {label:"Video Agency",value:-total.videoAgencyFees},{label:"LIVE Agency",value:-total.liveAgencyFees},{label:"Return Cost",value:-total.returnShippingCost},{label:"Other",value:-total.otherCosts},
+  ]}/>;
+}
+
+function RatioTrend({rows}:{rows:PnlRow[]}) {
+  const values=rows.map(row=>({key:row.key,margin:row.margin,cost:row.gmv ? (row.gmv-row.operatingProfit)/row.gmv*100:0}));
+  return <div className="ratio-trend"><div className="chart-legend"><span className="profit">Margin</span><span className="orders">Cost Ratio</span></div>{values.map(row=><div className="tip" data-tooltip={`${row.key}\nMargin ${row.margin.toFixed(2)}%\nCost Ratio ${row.cost.toFixed(2)}%`} key={row.key}><span>{row.key.slice(5)}</span><i><u style={{width:`${Math.max(0,Math.min(100,row.margin))}%`}}/><em style={{width:`${Math.max(0,Math.min(100,row.cost))}%`}}/></i><b>{row.margin.toFixed(1)}%</b></div>)}</div>;
+}
+
 function CostDonut({ total }: { total: PnlRow }) {
   const parts = [{ label: "COGS", value: total.cogs }, { label: "Affiliate", value: total.affiliateCommission }, { label: "Ad Spend", value: total.adSpend }, { label: "TikTok Fees", value: total.tiktokFees }, { label: "Agency", value: total.videoAgencyFees + total.liveAgencyFees }, { label: "Shipping + Other", value: total.sellerShippingCost + total.returnShippingCost + total.otherCosts }].filter((part) => part.value > 0);
   const sum = parts.reduce((value, part) => value + part.value, 0); let angle = 0; const gradient = parts.map((part, index) => { const start = angle; angle += part.value / sum * 360; return `${palette[index]} ${start}deg ${angle}deg`; }).join(",");
@@ -310,10 +357,10 @@ function CostComposition({ rows }: { rows: PnlRow[] }) {
 }
 
 function SkuProfitability({ rows, onSelect }: { rows: PnlRow[]; onSelect: (sku: string) => void }) {
-  const [sort, setSort] = useState<"gmv" | "operatingProfit" | "margin">("operatingProfit");
+  const [sort, setSort] = useState<"gmv" | "netRevenue" | "operatingProfit" | "margin" | "units">("operatingProfit");
   const ranked = [...rows].sort((a, b) => b[sort] - a[sort]).slice(0, 20);
   const max = Math.max(...ranked.map((row) => Math.abs(row[sort])), 1);
-  return <><div className="metric-switch"><button className={sort === "gmv" ? "active" : ""} onClick={() => setSort("gmv")}>GMV</button><button className={sort === "operatingProfit" ? "active" : ""} onClick={() => setSort("operatingProfit")}>Profit</button><button className={sort === "margin" ? "active" : ""} onClick={() => setSort("margin")}>Margin</button></div><div className="rank-bars">{ranked.map((row) => <button key={row.key} onClick={() => onSelect(row.key)} title={`${row.key}\nGMV ${preciseMoney.format(row.gmv)}\nNet Revenue ${preciseMoney.format(row.netRevenue)}\nOperating Profit ${preciseMoney.format(row.operatingProfit)}\nOperating Margin ${row.margin.toFixed(2)}%`}><strong>{row.key}</strong><i><u style={{ width: `${Math.max(1, Math.abs(row[sort]) / max * 100)}%` }} /></i><span>{sort === "margin" ? `${row.margin.toFixed(1)}%` : money.format(row[sort])}</span></button>)}</div></>;
+  return <><div className="metric-switch">{([['gmv','GMV'],['netRevenue','Net Revenue'],['operatingProfit','Profit'],['margin','Margin'],['units','Units']] as const).map(([key,label])=><button key={key} className={sort === key ? "active" : ""} onClick={() => setSort(key)}>{label}</button>)}</div><div className="rank-bars">{ranked.map((row) => {const calculated=row.financeFinal+row.financePending!==0; const needsFinance=sort==='netRevenue'||sort==='operatingProfit'||sort==='margin'; return <button className="tip" data-tooltip={`${row.key}\nGMV ${preciseMoney.format(row.gmv)}\nUnits ${number.format(row.units)}\nNet Revenue ${calculated?preciseMoney.format(row.netRevenue):'Not Calculated'}\nOperating Profit ${calculated?preciseMoney.format(row.operatingProfit):'Not Calculated'}\nMargin ${calculated?row.margin.toFixed(2)+'%':'Not Calculated'}\nClick to cross-filter`} key={row.key} onClick={() => onSelect(row.key)}><strong>{row.key}</strong><i><u style={{ width: `${Math.max(1, Math.abs(row[sort]) / max * 100)}%` }} /></i><span>{needsFinance&&!calculated?'Not Calculated':sort === "margin" ? `${row.margin.toFixed(1)}%` : sort==='units'?number.format(row.units):money.format(row[sort])}</span></button>})}</div></>;
 }
 
 function MarketingChart({ rows }: { rows: PnlRow[] }) {
@@ -321,17 +368,18 @@ function MarketingChart({ rows }: { rows: PnlRow[] }) {
   return <div className="marketing-chart">{rows.map((row) => { const costs = [row.adSpend, row.affiliateCommission, row.videoAgencyFees, row.liveAgencyFees]; const total = costs.reduce((a, b) => a + b, 0); return <div key={row.key} title={`${row.key}\nAd Spend ${preciseMoney.format(row.adSpend)}\nAffiliate ${preciseMoney.format(row.affiliateCommission)}\nVideo ${preciseMoney.format(row.videoAgencyFees)}\nLIVE ${preciseMoney.format(row.liveAgencyFees)}`}><div style={{ height: `${Math.max(5, total / max * 100)}%` }}>{costs.map((cost, index) => cost ? <i key={index} style={{ height: `${cost / total * 100}%`, background: palette[index + 3] }} /> : null)}</div><span>{row.key.slice(5)}</span></div>; })}</div>;
 }
 
-function ReturnsView({ data, selectedSku, onSkuSelect }: { data: ReturnsData; selectedSku: string; onSkuSelect: (sku: string) => void }) {
+function ReturnsView({ data, previous, selectedSku, onSkuSelect }: { data: ReturnsData; previous: ReturnsData; selectedSku: string; onSkuSelect: (sku: string) => void }) {
   const selected = selectedSku !== "ALL" ? data.skus.find((row) => row.sku === selectedSku) : undefined;
   return <>
     <div className="kpi-grid returns-kpis">
-      <Kpi label="SOLD UNITS" value={number.format(data.soldUnits)} note="Sales cohort denominator" source="TikTok Orders API" />
-      <Kpi label="RETURNED UNITS" value={number.format(data.returnedUnits)} note="Completed physical returns only" source="Returns API; rejected/canceled/pending excluded" />
-      <Kpi label="RETURN RATE" value={`${data.returnRate.toFixed(2)}%`} note="Returned Units ÷ Sold Units" tone={data.returnRate > 10 ? "negative" : ""} source="Sales cohort calculation" />
-      <Kpi label="REFUND AMOUNT" value={money.format(data.refundAmount)} note={`${data.refundGmvRate.toFixed(2)}% of cohort GMV`} source="TikTok Returns / Finance API" />
-      <Kpi label="ACTIVE SKUS" value={number.format(data.skuCount)} note={`${number.format(data.returnsCreatedDuringPeriod)} returns created in period`} source="Orders + Returns API" />
-      <Kpi label="TOP RISK SKU" value={data.skus[0]?.sku || "—"} note={data.skus[0] ? `${data.skus[0].returnRate.toFixed(1)}% return rate · investigate` : "No completed returns"} tone="negative" source="Returns API ranked by SKU rate" />
+      <Kpi label="SOLD UNITS" value={number.format(data.soldUnits)} current={data.soldUnits} previous={previous.soldUnits} note="Sales cohort denominator" source="TikTok Orders API" status="Actual" />
+      <Kpi label="RETURNED UNITS" value={number.format(data.returnedUnits)} current={data.returnedUnits} previous={previous.returnedUnits} note="Completed physical returns only" source="Returns API; rejected/canceled/pending excluded" status="Actual" />
+      <Kpi label="OVERALL RETURN RATE" value={`${data.returnRate.toFixed(2)}%`} current={data.returnRate} previous={previous.returnRate} note="Returned Units ÷ Sold Units" tone={data.returnRate > 10 ? "negative" : ""} source="Sales cohort calculation" status="Actual" />
+      <Kpi label="REFUND GMV RATE" value={`${data.refundGmvRate.toFixed(2)}%`} current={data.refundGmvRate} previous={previous.refundGmvRate} note={money.format(data.refundAmount)} source="TikTok Returns / Finance API" status="Actual" />
+      <Kpi label="RETURNS CREATED" value={number.format(data.returnsCreatedDuringPeriod)} current={data.returnsCreatedDuringPeriod} previous={previous.returnsCreatedDuringPeriod} note="Created in selected period" source="Returns API event date" status="Actual" />
+      <Kpi label="HIGHEST-RISK SKU" value={riskSku(data.skus)?.sku || "—"} note={riskSku(data.skus) ? `${riskSku(data.skus)!.returnedUnits} returns / ${riskSku(data.skus)!.soldUnits} sold` : "No completed returns"} tone="negative" source="Volume-adjusted risk score" status="Actual" />
     </div>
+    {selected && <section className="sku-diagnosis"><button onClick={()=>onSkuSelect("ALL")}>← All SKUs</button><div><span>SKU</span><b>{selected.sku}</b></div><div><span>Sold</span><b>{number.format(selected.soldUnits)}</b></div><div><span>Returned</span><b>{number.format(selected.returnedUnits)}</b></div><div><span>Return Rate</span><b>{selected.returnRate.toFixed(2)}%</b></div><div><span>Refund</span><b>{money.format(selected.refundAmount)}</b></div><div><span>vs Shop Avg</span><b>{selected.returnRate-data.returnRate>=0?'+':''}{(selected.returnRate-data.returnRate).toFixed(2)}pp</b></div></section>}
     <div className="dashboard-grid two-up">
       <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">OVERALL RETURN RATE</p><h2>Return Rate Trend</h2><small>销售 cohort 口径：该期间售出的商品最终发生的退货。</small></div></div><OverallReturnTrend skus={data.skus} /></section>
       <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SKU SHARE OF TOTAL RETURNS</p><h2>Returned Units Composition</h2><small>点击蓝色分区联动选择 SKU。</small></div></div><ReturnShareDonut rows={data.skus} onSelect={onSkuSelect} /></section>
@@ -368,8 +416,9 @@ function ReturnTrend({ rows }: { rows: ReturnSku["trend"] }) {
 }
 
 function ReasonDistribution({ skus, selected }: { skus: ReturnSku[]; selected?: ReturnSku }) {
+  const [mode,setMode]=useState<"share"|"units">("share");
   const universe = [...new Set(skus.flatMap((row) => row.reasons.map((reason) => reason.reason)))];
-  if (selected) { const byReason = new Map(selected.reasons.map((reason) => [reason.reason, reason])); return <div className="reason-ranked">{universe.map((name) => { const reason = byReason.get(name) || { reason: name, count: 0, share: 0, refundAmount: 0 }; return <div className="tip" data-tooltip={`${reason.reason}\nReturned Units: ${reason.count}\nShare of SKU Returns: ${reason.share.toFixed(2)}%\nRefund Amount: ${preciseMoney.format(reason.refundAmount)}`} key={reason.reason}><span><strong>{reason.reason}</strong><em>{reason.count} · {reason.share.toFixed(1)}%</em></span><i><u style={{ width: `${reason.share}%` }} /></i></div>; })}</div>; }
+  if (selected) { const byReason = new Map(selected.reasons.map((reason) => [reason.reason, reason])); const max=Math.max(...selected.reasons.map(r=>r.count),1); return <><div className="metric-switch"><button className={mode==='share'?'active':''} onClick={()=>setMode('share')}>% Composition</button><button className={mode==='units'?'active':''} onClick={()=>setMode('units')}>Return Units</button></div><div className="reason-ranked">{universe.map((name) => { const reason = byReason.get(name) || { reason: name, count: 0, share: 0, refundAmount: 0,rawReasons:[] }; const raw=reason.rawReasons?.map(item=>`${item.reason}: ${item.count}`).join("\n")||"No raw reason"; return <button className="tip" data-tooltip={`${reason.reason}\nReturned Units: ${reason.count}\nShare of SKU Returns: ${reason.share.toFixed(2)}%\nRefund Amount: ${preciseMoney.format(reason.refundAmount)}\n\nRaw TikTok Reasons\n${raw}`} key={reason.reason}><span><strong>{reason.reason}</strong><em>{reason.count} · {reason.share.toFixed(1)}%</em></span><i><u style={{ width: `${mode==='share'?reason.share:reason.count/max*100}%` }} /></i></button>; })}</div></>; }
   return <><div className="stack-legend">{universe.map((reason, index) => <span key={reason}><i style={{ background: palette[index % palette.length] }} />{reason}</span>)}</div><div className="reason-stack-list">{skus.filter((row) => row.returnedUnits).slice(0, 18).map((row) => { const byReason = new Map(row.reasons.map((reason) => [reason.reason, reason])); return <div key={row.sku}><strong>{row.sku}</strong><span>{universe.map((name, index) => { const reason = byReason.get(name); return <i className="tip" data-tooltip={`${row.sku}\n${name}\nReturned Units: ${reason?.count || 0}\nShare: ${(reason?.share || 0).toFixed(2)}%`} key={name} style={{ width: `${reason?.share || 0}%`, background: palette[index % palette.length] }} />; })}</span></div>; })}</div></>;
 }
 
