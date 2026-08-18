@@ -19,7 +19,9 @@ export async function ensureBbySchema(db: D1Database) {
 function credential(env: BbyEnv, store: string) { const apiKey = store === "JS" ? env.BESTBUY_JS_API_KEY : env.BESTBUY_SAP_API_KEY; if (!apiKey) throw new Error(`Best Buy ${store} Mirakl secret is not configured`); return apiKey; }
 async function mirakl(env: BbyEnv, store: string, path: string, params: Record<string,string>) {
   const base=(env.BESTBUY_MIRAKL_URL || "https://bestbuyus-prod.mirakl.net").replace(/\/$/,""); const url=new URL(`${base}${path}`); Object.entries(params).forEach(([k,v])=>url.searchParams.set(k,v));
-  const response=await fetch(url,{headers:{Authorization:credential(env,store),Accept:"application/json"}}); if(!response.ok) throw new Error(`Mirakl ${path} ${response.status}`); return response.json() as Promise<Obj>;
+  const token=credential(env,store); let response=await fetch(url,{headers:{Authorization:token,Accept:"application/json"}});
+  if(response.status===401||response.status===403) response=await fetch(url,{headers:{Authorization:`Bearer ${token}`,Accept:"application/json"}});
+  if(!response.ok) throw new Error(`Mirakl ${path} ${response.status}`); return response.json() as Promise<Obj>;
 }
 
 export async function syncBby(env: BbyEnv, store: "SAP"|"JS", from: string, to: string) {
