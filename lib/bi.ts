@@ -30,6 +30,7 @@ export type SalesFact = {
   financeStatus?: string;
   adjustmentAmount?: number;
   unmappedDifference?: number;
+  rawJson?: string;
 };
 
 export type CostFact = {
@@ -529,13 +530,25 @@ function salesQuery() {
     s.seller_discount AS sellerDiscount, s.refund_amount AS refundAmount, s.shipping_revenue AS shippingRevenue,
     s.financial_net_sales AS financialNetSales, s.platform_fee AS platformFee,
     s.affiliate_commission AS affiliateCommission, s.shipping_cost AS shippingCost,
-    COALESCE(f.return_shipping_actual,0) AS returnShippingActual,
+    COALESCE(f.return_shipping_actual,0) AS returnShippingActual, s.raw_json AS rawJson,
     COALESCE(ft.settlementAmount,s.settlement_amount) AS settlementAmount, ft.financeStatus,
     COALESCE(ft.adjustmentAmount,0) AS adjustmentAmount, COALESCE(ft.unmappedDifference,0) AS unmappedDifference
     FROM sales_lines s LEFT JOIN finance_line_costs f ON f.sales_line_id=s.id
     LEFT JOIN (SELECT order_id,line_item_id,MAX(finance_status) AS financeStatus,SUM(settlement_amount) AS settlementAmount,
       SUM(adjustment_amount) AS adjustmentAmount,SUM(unmapped_difference) AS unmappedDifference
       FROM finance_transactions GROUP BY order_id,line_item_id) ft ON ft.order_id=s.order_id AND (ft.line_item_id=s.line_item_id OR ft.line_item_id='')`;
+}
+
+function sampleSale(line: SalesFact) {
+  const raw = String(line.rawJson || "");
+  if (!raw) return false;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const order = (parsed.order || parsed) as Record<string, unknown>;
+    const item = (parsed.line || {}) as Record<string, unknown>;
+    const fields = [order.order_type, order.type, order.fulfillment_type, order.is_sample_order, order.sample_order, item.order_type, item.is_sample, item.sample_type];
+    return fields.some(value => value === true || /sample|free_sample|creator_sample/i.test(String(value || "")));
+  } catch { return /sample|free_sample|creator_sample/i.test(raw); }
 }
 
 export type SnapshotFilters = { from?: string | null; to?: string | null; granularity?: string | null; product?: string | null; sku?: string | null; returnType?: string | null; returnStatus?: string | null };
@@ -608,8 +621,13 @@ export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = 
   for (const statement of statementsResult.results) { const key = bucketString(statement.statementTime, normalizedGranularity(filters.granularity)); const items = statementBuckets.get(key) || []; items.push(statement); statementBuckets.set(key, items); }
   const reconciled = { total: useStatementSummary ? applyStatements(calculated.total, statementsResult.results) : strictFinance(calculated.total), trend: calculated.trend.map((row) => useStatementSummary ? applyStatements(row, statementBuckets.get(row.key) || []) : strictFinance(row)),
     months: calculated.months.map((row) => useStatementSummary ? applyStatements(row, statementBuckets.get(row.key) || []) : strictFinance(row)), skus: calculated.skus.map(strictFinance) };
+  const validFiltered = filtered.filter(line => validSale(line.orderStatus));
+  const sampleLines = validFiltered.filter(sampleSale), commercialLines = validFiltered.filter(line => !sampleSale(line));
+  const orderMix = { commercialOrders: new Set(commercialLines.map(line => line.orderId)).size, sampleOrders: new Set(sampleLines.map(line => line.orderId)).size,
+    returnedOrders: new Set(returnsResult.results.filter(item => completedReturn(item.status)).map(item => item.orderId).filter(Boolean)).size,
+    commercialUnits: commercialLines.reduce((sum,line)=>sum+line.quantity,0), sampleUnits: sampleLines.reduce((sum,line)=>sum+line.quantity,0) };
   return { range: { from: range.from, to: range.to }, granularity: normalizedGranularity(filters.granularity), dimensions, ...calculated,
-    ...reconciled, financeCoverage,
+    ...reconciled, financeCoverage, orderMix,
     sources: [
       { metric: "GMV / Orders / Units", source: "TikTok Orders API", status: "actual" },
       { metric: "Refunds / TikTok Fees / Shipping / Affiliate", source: "TikTok Finance API", status: "actual-or-pending" },
@@ -642,8 +660,9 @@ export async function getReturnsSnapshot(db: D1Database, filters: SnapshotFilter
   const filteredReturns = returnsResult.results.filter((item) => skus.has(item.sku) && orders.has(item.orderId || "")
     && (!filters.returnType || filters.returnType === "ALL" || item.returnType === filters.returnType)
     && (!filters.returnStatus || filters.returnStatus === "ALL" || item.status === filters.returnStatus));
+  const sampleUnits = filteredSales.filter(sampleSale).reduce((sum,line)=>sum+line.quantity,0);
   return { range: { from: range.from, to: range.to }, granularity: normalizedGranularity(filters.granularity), dimensions,
-    returnsCreatedDuringPeriod: createdResult?.count || 0, ...calculateReturns(filteredSales, filteredReturns, shippingResult.results, normalizedGranularity(filters.granularity)),
+    returnsCreatedDuringPeriod: createdResult?.count || 0, sampleUnits, commercialSoldUnits: Math.max(0,filteredSales.reduce((sum,line)=>sum+line.quantity,0)-sampleUnits), ...calculateReturns(filteredSales, filteredReturns, shippingResult.results, normalizedGranularity(filters.granularity)),
     sources: [{ metric: "Sold Units", source: "TikTok Orders API sales cohort" }, { metric: "Returns / Reasons / Refunds", source: "TikTok Returns & Refunds API joined to original order + SKU" }, { metric: "Return Shipping", source: "Finance actual when available; uploaded per-unit rule fallback" }] };
 }
 
