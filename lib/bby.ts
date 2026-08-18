@@ -11,20 +11,11 @@ function key(date: number, granularity: Granularity) { const d = new Date(date);
 export async function ensureBbySchema(db: D1Database) {
   await db.exec(`CREATE TABLE IF NOT EXISTS bby_sales_lines (id TEXT PRIMARY KEY,store_code TEXT NOT NULL,order_id TEXT NOT NULL,sku TEXT NOT NULL,product_name TEXT NOT NULL,quantity INTEGER NOT NULL,ordered_at INTEGER NOT NULL,gross_sales REAL NOT NULL,status TEXT NOT NULL,raw_json TEXT NOT NULL,updated_at INTEGER NOT NULL);
   CREATE INDEX IF NOT EXISTS idx_bby_sales_store_date ON bby_sales_lines(store_code,ordered_at);
+  CREATE INDEX IF NOT EXISTS idx_bby_sales_store_order_sku ON bby_sales_lines(store_code,order_id,sku);
   CREATE TABLE IF NOT EXISTS bby_return_lines (id TEXT PRIMARY KEY,store_code TEXT NOT NULL,order_id TEXT,line_item_id TEXT,sku TEXT NOT NULL,reason TEXT NOT NULL,quantity INTEGER NOT NULL,refund_amount REAL NOT NULL,status TEXT NOT NULL,requested_at INTEGER NOT NULL,raw_json TEXT NOT NULL,updated_at INTEGER NOT NULL);
   CREATE INDEX IF NOT EXISTS idx_bby_returns_store_date ON bby_return_lines(store_code,requested_at);`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_bby_returns_store_order_sku ON bby_return_lines(store_code,order_id,sku);`);
   await db.exec(`CREATE TABLE IF NOT EXISTS bby_sync_windows (id TEXT PRIMARY KEY,store_code TEXT NOT NULL,window_start TEXT NOT NULL,window_end TEXT NOT NULL,status TEXT NOT NULL,orders_count INTEGER NOT NULL,returns_count INTEGER NOT NULL,updated_at INTEGER NOT NULL);`);
-}
-
-async function allRows<T>(db:D1Database, sql:string, bindings:any[]) {
-  const rows:T[]=[]; let offset=0; const limit=500;
-  while(true){
-    const page=await db.prepare(`${sql} LIMIT ? OFFSET ?`).bind(...bindings,limit,offset).all<T>();
-    rows.push(...page.results);
-    if(page.results.length<limit)break;
-    offset+=page.results.length;
-  }
-  return rows;
 }
 
 function credential(env: BbyEnv, store: string) { const apiKey = store === "JS" ? env.BESTBUY_JS_API_KEY : env.BESTBUY_SAP_API_KEY; if (!apiKey) throw new Error(`Best Buy ${store} Mirakl secret is not configured`); return apiKey; }
@@ -49,12 +40,17 @@ export async function syncBby(env: BbyEnv, store: "SAP"|"JS", from: string, to: 
 export async function getBbyReturns(db:D1Database, input:{store:string;from:string;to:string;granularity:Granularity;sku?:string}) {
   const start=Date.parse(`${input.from}T00:00:00Z`),end=Date.parse(`${input.to}T23:59:59Z`);
   if(!Number.isFinite(start)||!Number.isFinite(end)||start>end)throw new Error("Invalid Best Buy date range");
-  const sales=await allRows<any>(db,`SELECT * FROM bby_sales_lines WHERE store_code=? AND ordered_at BETWEEN ? AND ?`,[input.store,start,end]);
+  const [salesResult,returnsResult,createdResult]=await Promise.all([
+    db.prepare(`SELECT order_id,sku,product_name,quantity,ordered_at,gross_sales,status FROM bby_sales_lines WHERE store_code=? AND ordered_at BETWEEN ? AND ?`).bind(input.store,start,end).all<any>(),
+    db.prepare(`SELECT r.order_id,r.sku,r.reason,r.quantity,r.refund_amount,r.status,r.requested_at FROM bby_return_lines r WHERE r.store_code=? AND EXISTS (SELECT 1 FROM bby_sales_lines s WHERE s.store_code=r.store_code AND s.order_id=r.order_id AND s.sku=r.sku AND s.ordered_at BETWEEN ? AND ?)`).bind(input.store,start,end).all<any>(),
+    db.prepare(`SELECT COALESCE(SUM(quantity),0) AS count FROM bby_return_lines WHERE store_code=? AND requested_at BETWEEN ? AND ?`).bind(input.store,start,end).first<{count:number}>(),
+  ]);
+  const sales=salesResult.results;
   const validSales=sales.filter(row=>!/(CANCEL|CANCELED|CANCELLED|REFUSED|REJECTED)/i.test(String(row.status||"")));
-  const returns=await allRows<any>(db,`SELECT r.* FROM bby_return_lines r WHERE r.store_code=? AND EXISTS (SELECT 1 FROM bby_sales_lines s WHERE s.store_code=r.store_code AND s.order_id=r.order_id AND s.sku=r.sku AND s.ordered_at BETWEEN ? AND ?)`,[input.store,start,end]);
+  const returns=returnsResult.results;
   const bySku=new Map<string,any>(); for(const sale of validSales){if(input.sku&&input.sku!=="ALL"&&sale.sku!==input.sku)continue; const row=bySku.get(sale.sku)||{sku:sale.sku,productName:sale.product_name,soldUnits:0,returnedUnits:0,refundAmount:0,reasons:new Map(),trend:new Map()}; row.soldUnits+=sale.quantity; const k=key(sale.ordered_at,input.granularity); const t=row.trend.get(k)||{key:k,soldUnits:0,returnedUnits:0,returnRate:0};t.soldUnits+=sale.quantity;row.trend.set(k,t);bySku.set(sale.sku,row);}
   for(const ret of returns){const row=bySku.get(ret.sku);if(!row)continue; row.returnedUnits+=ret.quantity;row.refundAmount+=ret.refund_amount;row.reasons.set(ret.reason,(row.reasons.get(ret.reason)||0)+ret.quantity); const sale=validSales.find(x=>x.order_id===ret.order_id&&x.sku===ret.sku);if(sale){const t=row.trend.get(key(sale.ordered_at,input.granularity));if(t)t.returnedUnits+=ret.quantity;}}
   const skus=[...bySku.values()].map(row=>{const reasons=[...row.reasons.entries()].map(([reason,count]:any)=>({reason,count,share:row.returnedUnits?count/row.returnedUnits*100:0,refundAmount:0,rawReasons:[{reason,count}]})).sort((a,b)=>b.count-a.count);const trend=[...row.trend.values()].sort((a:any,b:any)=>a.key.localeCompare(b.key)).map((t:any)=>({...t,returnRate:t.soldUnits?t.returnedUnits/t.soldUnits*100:0}));return {...row,reasons,trend,reasonTrend:[],returnRate:row.soldUnits?row.returnedUnits/row.soldUnits*100:0,refundGmvRate:0,returnShippingCost:0};}).sort((a,b)=>b.returnedUnits-a.returnedUnits);
   const soldUnits=skus.reduce((x,r)=>x+r.soldUnits,0),returnedUnits=skus.reduce((x,r)=>x+r.returnedUnits,0),refundAmount=skus.reduce((x,r)=>x+r.refundAmount,0),gmv=validSales.reduce((x,r)=>x+r.gross_sales,0),orderCount=new Set(validSales.filter(r=>!input.sku||input.sku==="ALL"||r.sku===input.sku).map(r=>r.order_id)).size;
-  return {range:{from:input.from,to:input.to},granularity:input.granularity,dimensions:{products:[...new Set(validSales.map(r=>r.product_name))],skus:[...new Set(validSales.map(r=>r.sku))],returnTypes:[],returnStatuses:[]},orderCount,soldUnits,returnedUnits,returnRate:soldUnits?returnedUnits/soldUnits*100:0,refundAmount,refundGmvRate:gmv?refundAmount/gmv*100:0,returnShippingCost:0,skuCount:skus.length,returnsCreatedDuringPeriod:returns.filter(r=>r.requested_at>=start&&r.requested_at<=end).reduce((x,r)=>x+r.quantity,0),skus,sources:[{metric:"Orders",source:`Best Buy ${input.store} · distinct Mirakl order_id`},{metric:"Sold Units",source:"Mirakl order lines · canceled/refused/rejected excluded"},{metric:"Returns / refunds",source:"Mirakl order-line refunds; missing values are not treated as zero"}],totalSoldUnits:soldUnits,sampleUnits:0,commercialSoldUnits:soldUnits};
+  return {range:{from:input.from,to:input.to},granularity:input.granularity,dimensions:{products:[...new Set(validSales.map(r=>r.product_name))],skus:[...new Set(validSales.map(r=>r.sku))],returnTypes:[],returnStatuses:[]},orderCount,soldUnits,returnedUnits,returnRate:soldUnits?returnedUnits/soldUnits*100:0,refundAmount,refundGmvRate:gmv?refundAmount/gmv*100:0,returnShippingCost:0,skuCount:skus.length,returnsCreatedDuringPeriod:createdResult?.count||0,skus,sources:[{metric:"Orders",source:`Best Buy ${input.store} · distinct Mirakl order_id`},{metric:"Sold Units",source:"Mirakl order lines · canceled/refused/rejected excluded"},{metric:"Returns / refunds",source:"Mirakl order-line refunds; missing values are not treated as zero"}],totalSoldUnits:soldUnits,sampleUnits:0,commercialSoldUnits:soldUnits};
 }
