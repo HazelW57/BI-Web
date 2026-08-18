@@ -28,6 +28,7 @@ type ReturnsData = {
   totalSoldUnits?: number; sampleUnits?: number; commercialSoldUnits?: number;
   orderCount?: number;
   commercialOrderCount?:number; excludedOrderCount?:number; excludedUnits?:number;
+  reasonCoverage?: { mappedUnits: number; totalUnits: number; rate: number };
 };
 type BbyExclusion={orderId:string;note:string;submittedBy:string;createdAt:number};
 type SyncData = {
@@ -465,7 +466,7 @@ function ReturnsView({ data, previous, selectedSku, onSkuSelect, platform = "Tik
       <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">RETURN RATE BY SKU · CLICK TO CROSS-FILTER</p><h2>SKU Risk Ranking</h2><small>Sorted by Return Rate ↓ · ties: Returned Units ↓, Sold Units ↓</small></div><button className="clear-filter" onClick={() => onSkuSelect("ALL")}>All SKUs</button></div><ReturnRateBars rows={data.skus} onSelect={onSkuSelect} /></section>
       {selected && <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SELECTED SKU TREND</p><h2>{selected.sku}</h2></div></div><ReturnTrend rows={selected.trend} /></section>}
     </div>
-    {selected && <div className="dashboard-grid two-up"><section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SELECTED SKU · PLATFORM RETURN REASONS</p><h2>{`Why ${selected.sku} Is Returned`}</h2><small>保留 {platform} 返回的原始原因，不做人工合并。</small></div></div><ReasonDistribution skus={data.skus} selected={selected} /></section><section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SKU × PLATFORM RETURN REASON MIX (100%)</p><h2>Platform Reason Composition by SKU</h2></div></div><ReasonDistribution skus={data.skus} /></section></div>}
+    {selected && <div className="dashboard-grid two-up"><section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SELECTED SKU · PLATFORM RETURN REASONS</p><h2>{`Why ${selected.sku} Is Returned`}</h2><small>保留 {platform} 返回的原始原因，不做人工合并。</small></div>{platform.startsWith("Best Buy")&&data.reasonCoverage&&<span className="range-badge">Mapped {number.format(data.reasonCoverage.mappedUnits)} / {number.format(data.reasonCoverage.totalUnits)} · {data.reasonCoverage.rate.toFixed(1)}%</span>}</div><ReasonDistribution skus={data.skus} selected={selected} /></section><section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SKU × PLATFORM RETURN REASON MIX (100%)</p><h2>Platform Reason Composition by SKU</h2></div></div><ReasonDistribution skus={data.skus} /></section></div>}
     <section className="panel source-panel"><div className="section-head"><div><p className="kicker">TRACEABILITY</p><h2>R&R 数据来源</h2></div></div><div className="source-list">{data.sources.map((source) => <div key={source.metric}><strong>{source.metric}</strong><span>{source.source}</span></div>)}</div></section>
   </>;
 }
