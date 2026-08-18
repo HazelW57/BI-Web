@@ -238,15 +238,15 @@ function PnlView({ data, admin, onOpenCosts, onSkuSelect }: { data: PnlData; adm
     </div>
     <div className="cost-strip">{costMetrics.map(([label, value, source]) => <article key={label} title={`Source: ${source}`}><span>{label}<i>i</i></span><strong>{money.format(value)}</strong><small>{percentOf(value, total.gmv)}</small></article>)}</div>
 
-    <section className="panel chart-panel primary-chart"><div className="section-head"><div><p className="kicker">REVENUE / PROFIT / ORDERS</p><h2>Revenue, Profit & Orders Trend</h2><small>GMV、Net Revenue、Operating Profit 使用左轴；Orders 使用右轴。</small></div><span className="range-badge">{data.granularity.toUpperCase()}</span></div>{data.trend.length ? <TrendChart rows={data.trend} /> : <Empty>当前筛选条件下没有销售记录。</Empty>}</section>
-
+    <div className="dashboard-grid excel-hero-grid">
+      <section className="panel chart-panel primary-chart"><div className="section-head"><div><p className="kicker">BUSINESS PERFORMANCE</p><h2>Revenue & Profit Trend</h2><small>Revenue holds while margin softens · GMV / Net Revenue / Operating Profit / Orders</small></div><span className="range-badge">{data.granularity.toUpperCase()}</span></div>{data.trend.length ? <TrendChart rows={data.trend} /> : <Empty>当前筛选条件下没有销售记录。</Empty>}</section>
+      <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">WHERE MONEY WAS SPENT</p><h2>Cost Composition</h2></div></div><CostDonut total={total} /></section>
+    </div>
     <div className="dashboard-grid two-up">
       <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">P&L BRIDGE</p><h2>Profit Waterfall</h2></div></div><Waterfall total={total} /></section>
-      <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">COST MIX</p><h2>Cost Composition Over Time</h2></div></div><CostComposition rows={data.trend} /></section>
+      <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">MARKETING EFFICIENCY</p><h2>Marketing Spend & Efficiency</h2></div></div><MarketingChart rows={data.trend} /></section>
     </div>
-
-    <section className="panel chart-panel sku-profitability"><div className="section-head"><div><p className="kicker">SKU PROFITABILITY</p><h2>SKU Profit Ranking</h2><small>点击 SKU 可筛选整个 Dashboard。</small></div></div><SkuProfitability rows={data.skus} onSelect={onSkuSelect} /></section>
-    <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">MARKETING EFFICIENCY</p><h2>Marketing Spend & Efficiency</h2><small>Ad Spend、Affiliate、Video 与 LIVE 分开呈现；ROAS 待 API for Business 接入后启用。</small></div></div><MarketingChart rows={data.trend} /></section>
+    <div className="dashboard-grid excel-hero-grid"><section className="panel chart-panel sku-profitability"><div className="section-head"><div><p className="kicker">WHICH SKU MAKES MONEY</p><h2>Profitability Ranking</h2><small>点击 SKU 可筛选整个 Dashboard。</small></div></div><SkuProfitability rows={data.skus} onSelect={onSkuSelect} /></section><section className="panel chart-panel"><div className="section-head"><div><p className="kicker">MANAGEMENT SIGNALS</p><h2>What Needs Attention</h2></div></div><ManagementSignals total={total} skus={data.skus} /></section></div>
 
     <section className="panel formula traceability"><div className="section-head"><div><p className="kicker">MANAGEMENT P&L</p><h2>口径与数据来源</h2></div>{admin && <button className="apply" onClick={onOpenCosts}>Cost Inputs</button>}</div>
       <div className="formula-grid"><div><span>GMV</span><b>{money.format(total.gmv)}</b></div><div><span>− Refunds</span><b>{money.format(total.refunds)}</b></div><div><span>− TikTok Fees</span><b>{money.format(total.tiktokFees)}</b></div><div><span>− Seller Shipping</span><b>{money.format(total.sellerShippingCost)}</b></div><div className="subtotal"><span>= Net Revenue</span><b>{money.format(total.netRevenue)}</b></div><div><span>− Product / Affiliate / Ads / Agency / Returns / Other</span><b>{money.format(total.netRevenue - total.operatingProfit)}</b></div><div className="total"><span>= Operating Profit</span><b>{money.format(total.operatingProfit)}</b></div></div>
@@ -284,6 +284,17 @@ function Waterfall({ total }: { total: PnlRow }) {
   return <div className="waterfall">{steps.map(([label, value, kind]) => <div key={label} className={kind} title={`${label}\n${value < 0 ? "-" : ""}${preciseMoney.format(Math.abs(value))}\n${percentOf(Math.abs(value), total.gmv)}`}><div><i style={{ height: `${Math.max(5, Math.abs(value) / max * 100)}%` }} /></div><strong>{value < 0 ? "−" : ""}{money.format(Math.abs(value))}</strong><span>{label}</span></div>)}</div>;
 }
 
+function CostDonut({ total }: { total: PnlRow }) {
+  const parts = [{ label: "COGS", value: total.cogs }, { label: "Affiliate", value: total.affiliateCommission }, { label: "Ad Spend", value: total.adSpend }, { label: "TikTok Fees", value: total.tiktokFees }, { label: "Agency", value: total.videoAgencyFees + total.liveAgencyFees }, { label: "Shipping + Other", value: total.sellerShippingCost + total.returnShippingCost + total.otherCosts }].filter((part) => part.value > 0);
+  const sum = parts.reduce((value, part) => value + part.value, 0); let angle = 0; const gradient = parts.map((part, index) => { const start = angle; angle += part.value / sum * 360; return `${palette[index]} ${start}deg ${angle}deg`; }).join(",");
+  return <div className="cost-donut-card"><div className="return-donut" style={{ background: `conic-gradient(${gradient || "#e6eef8 0deg 360deg"})` }}><span><b>{money.format(sum)}</b><small>modeled cost</small></span></div><div className="donut-legend">{parts.map((part, index) => <div key={part.label}><i style={{ background: palette[index] }} /><span>{part.label}</span><b>{sum ? (part.value / sum * 100).toFixed(1) : 0}%</b></div>)}</div></div>;
+}
+
+function ManagementSignals({ total, skus }: { total: PnlRow; skus: PnlRow[] }) {
+  const top = [...skus].sort((a, b) => b.operatingProfit - a.operatingProfit).slice(0, 2); const modeled = total.cogs + total.affiliateCommission + total.adSpend + total.videoAgencyFees + total.liveAgencyFees + total.returnShippingCost + total.otherCosts;
+  return <div className="management-signals"><div><b>01 · MARGIN WATCH</b><span>{total.margin.toFixed(1)}% operating margin{total.financePending ? " · pending finance included" : ""}</span></div><div><b>02 · COST DRIVER</b><span>COGS + affiliate = {modeled ? ((total.cogs + total.affiliateCommission) / modeled * 100).toFixed(0) : 0}% of modeled cost</span></div><div><b>03 · SKU OPPORTUNITY</b><span>{top.length ? `${top.map((row) => row.key).join(" + ")} contribute ${money.format(top.reduce((sum, row) => sum + row.operatingProfit, 0))} profit` : "Waiting for SKU cost coverage"}</span></div></div>;
+}
+
 const costKeys: { key: keyof PnlRow; label: string }[] = [
   { key: "tiktokFees", label: "TikTok Fees" }, { key: "sellerShippingCost", label: "Shipping" }, { key: "cogs", label: "COGS" },
   { key: "affiliateCommission", label: "Affiliate" }, { key: "adSpend", label: "Ads" }, { key: "videoAgencyFees", label: "Video" },
@@ -316,20 +327,18 @@ function ReturnsView({ data, selectedSku, onSkuSelect }: { data: ReturnsData; se
       <Kpi label="RETURNED UNITS" value={number.format(data.returnedUnits)} note="Completed physical returns only" source="Returns API; rejected/canceled/pending excluded" />
       <Kpi label="RETURN RATE" value={`${data.returnRate.toFixed(2)}%`} note="Returned Units ÷ Sold Units" tone={data.returnRate > 10 ? "negative" : ""} source="Sales cohort calculation" />
       <Kpi label="REFUND AMOUNT" value={money.format(data.refundAmount)} note={`${data.refundGmvRate.toFixed(2)}% of cohort GMV`} source="TikTok Returns / Finance API" />
-      <Kpi label="REFUND GMV RATE" value={`${data.refundGmvRate.toFixed(2)}%`} note="Refund Amount ÷ cohort GMV" source="Orders + Returns API" />
-      <Kpi label="RETURN SHIPPING" value={money.format(data.returnShippingCost)} note="Actual or per-unit fallback" source="Finance actual; uploaded rule fallback" />
       <Kpi label="ACTIVE SKUS" value={number.format(data.skuCount)} note={`${number.format(data.returnsCreatedDuringPeriod)} returns created in period`} source="Orders + Returns API" />
+      <Kpi label="TOP RISK SKU" value={data.skus[0]?.sku || "—"} note={data.skus[0] ? `${data.skus[0].returnRate.toFixed(1)}% return rate · investigate` : "No completed returns"} tone="negative" source="Returns API ranked by SKU rate" />
     </div>
     <div className="dashboard-grid two-up">
       <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">OVERALL RETURN RATE</p><h2>Return Rate Trend</h2><small>销售 cohort 口径：该期间售出的商品最终发生的退货。</small></div></div><OverallReturnTrend skus={data.skus} /></section>
       <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SKU SHARE OF TOTAL RETURNS</p><h2>Returned Units Composition</h2><small>点击蓝色分区联动选择 SKU。</small></div></div><ReturnShareDonut rows={data.skus} onSelect={onSkuSelect} /></section>
     </div>
-    <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SKU RETURN RISK</p><h2>Return Rate by SKU</h2><small>按销售 cohort 计算；点击 SKU 可钻取全部 R&R 图表。</small></div><button className="clear-filter" onClick={() => onSkuSelect("ALL")}>All SKUs</button></div><ReturnRateBars rows={data.skus} onSelect={onSkuSelect} /></section>
     <div className="dashboard-grid two-up">
-      <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">RETURN TREND</p><h2>{selected ? `${selected.sku} Return Trend` : "Select a SKU"}</h2></div></div>{selected ? <ReturnTrend rows={selected.trend} /> : <Empty>从 Return Rate by SKU 图中选择一个 SKU。</Empty>}</section>
-      <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">REASON DISTRIBUTION</p><h2>{selected ? `${selected.sku} Return Reasons` : "Reason Mix by SKU"}</h2></div></div><ReasonDistribution skus={data.skus} selected={selected} /></section>
+      <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">RETURN RATE BY SKU · CLICK TO CROSS-FILTER</p><h2>SKU Risk Ranking</h2></div><button className="clear-filter" onClick={() => onSkuSelect("ALL")}>All SKUs</button></div><ReturnRateBars rows={data.skus} onSelect={onSkuSelect} /></section>
+      <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SELECTED SKU TREND</p><h2>{selected ? selected.sku : "Select a SKU"}</h2></div></div>{selected ? <ReturnTrend rows={selected.trend} /> : <Empty>从左侧选择一个 SKU。</Empty>}</section>
     </div>
-    <section className="panel chart-panel"><div className="section-head"><div><p className="kicker">REASON TREND</p><h2>Return Reason Trend</h2><small>原因变化按原订单销售 cohort 的日期粒度展示。</small></div></div>{selected ? <ReasonTrend rows={selected.reasonTrend} /> : <Empty>选择一个 SKU 后查看原因趋势。</Empty>}</section>
+    <div className="dashboard-grid two-up"><section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SELECTED SKU RETURN REASONS</p><h2>{selected ? `Why ${selected.sku} Is Returned` : "Select a SKU"}</h2></div></div>{selected ? <ReasonDistribution skus={data.skus} selected={selected} /> : <Empty>选择 SKU 后查看原因占比。</Empty>}</section><section className="panel chart-panel"><div className="section-head"><div><p className="kicker">SKU × RETURN REASON MIX (100%)</p><h2>Reason Composition by SKU</h2></div></div><ReasonDistribution skus={data.skus} /></section></div>
     <section className="panel source-panel"><div className="section-head"><div><p className="kicker">TRACEABILITY</p><h2>R&R 数据来源</h2></div></div><div className="source-list">{data.sources.map((source) => <div key={source.metric}><strong>{source.metric}</strong><span>{source.source}</span></div>)}</div></section>
   </>;
 }
