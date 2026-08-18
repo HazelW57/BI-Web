@@ -578,10 +578,11 @@ export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = 
     return { ...row, netRevenue: round(netRevenue), revenue: round(netRevenue), operatingProfit: round(operatingProfit),
       contributionProfit: round(netRevenue - row.cogs), margin: netRevenue ? round(operatingProfit / netRevenue * 100) : 0 };
   };
-  const financeMappedLines = filtered.filter((line) => line.settlementAmount !== null).length;
+  const financeEligible = filtered.filter((line) => validSale(line.orderStatus));
+  const financeMappedLines = financeEligible.filter((line) => line.settlementAmount !== null).length;
   const useStatementSummary = (!filters.product || filters.product === "ALL") && (!filters.sku || filters.sku === "ALL") && statementsResult.results.length > 0;
-  const financeCoverage = { mappedLines: financeMappedLines, totalLines: filtered.length,
-    percent: filtered.length ? round(financeMappedLines / filtered.length * 100) : 0,
+  const financeCoverage = { mappedLines: financeMappedLines, totalLines: financeEligible.length,
+    percent: financeEligible.length ? round(financeMappedLines / financeEligible.length * 100) : 0,
     statementCount: statementsResult.results.length, settlementSummary: useStatementSummary,
     status: financeMappedLines === filtered.length ? "complete" : useStatementSummary ? "statement-summary" : "incomplete" };
   const applyStatements = (row: PnlRow, statements: FinanceStatementFact[]) => {
