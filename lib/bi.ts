@@ -226,6 +226,12 @@ const BI_SCHEMA = [
 
 export async function ensureBiSchema(db: D1Database) {
   await db.batch(BI_SCHEMA.map((sql) => db.prepare(sql)));
+  const mappings = [["1732503277203067045", "Chrona_BG"], ["1732469105697001637", "Pocket_Pro"], ["1732469105697067173", "L10S_Pro_Ultra"]] as const;
+  await db.batch(mappings.flatMap(([source, target]) => [
+    db.prepare("UPDATE sales_lines SET sku=? WHERE sku=?").bind(target, source),
+    db.prepare("UPDATE return_lines SET sku=? WHERE sku=?").bind(target, source),
+    db.prepare("UPDATE affiliate_orders SET sku=? WHERE sku=?").bind(target, source),
+  ]));
 }
 
 function round(value: number) {
@@ -310,7 +316,7 @@ function finalize(row: PnlAccumulator): PnlRow {
   row.netRevenue = row.financeFinal + row.financePending || row.settlement || row.gmv - row.refunds - row.tiktokFees - row.sellerShippingCost;
   row.operatingProfit = row.netRevenue - row.cogs - row.adSpend - row.videoAgencyFees
     - row.liveAgencyFees - row.returnShippingCost - row.otherCosts;
-  row.margin = row.netRevenue ? row.operatingProfit / row.netRevenue * 100 : 0;
+  row.margin = row.gmv ? row.operatingProfit / row.gmv * 100 : 0;
   row.revenue = row.netRevenue;
   row.platformFees = row.tiktokFees;
   row.shippingCost = row.sellerShippingCost;
@@ -576,7 +582,7 @@ export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = 
     const netRevenue = row.financeFinal + row.financePending;
     const operatingProfit = netRevenue - row.cogs - row.adSpend - row.videoAgencyFees - row.liveAgencyFees - row.returnShippingCost - row.otherCosts;
     return { ...row, netRevenue: round(netRevenue), revenue: round(netRevenue), operatingProfit: round(operatingProfit),
-      contributionProfit: round(netRevenue - row.cogs), margin: netRevenue ? round(operatingProfit / netRevenue * 100) : 0 };
+      contributionProfit: round(netRevenue - row.cogs), margin: row.gmv ? round(operatingProfit / row.gmv * 100) : 0 };
   };
   const financeEligible = filtered.filter((line) => validSale(line.orderStatus));
   const financeMappedLines = financeEligible.filter((line) => line.settlementAmount !== null).length;
@@ -596,7 +602,7 @@ export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = 
     return { ...row, netRevenue: round(settlement), revenue: round(settlement), settlement: round(settlement), financeFinal: round(settlement),
       tiktokFees: round(Math.abs(fees)), sellerShippingCost: round(Math.abs(shipping)), adjustments: round(adjustments),
       unmappedDifference: round(settlement - revenue - fees - shipping - adjustments), operatingProfit: round(operatingProfit),
-      contributionProfit: round(settlement - row.cogs), margin: settlement ? round(operatingProfit / settlement * 100) : 0 };
+      contributionProfit: round(settlement - row.cogs), margin: row.gmv ? round(operatingProfit / row.gmv * 100) : 0 };
   };
   const statementBuckets = new Map<string, FinanceStatementFact[]>();
   for (const statement of statementsResult.results) { const key = bucketString(statement.statementTime, normalizedGranularity(filters.granularity)); const items = statementBuckets.get(key) || []; items.push(statement); statementBuckets.set(key, items); }

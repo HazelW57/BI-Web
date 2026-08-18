@@ -33,6 +33,11 @@ function timestampValue(value: unknown, fallback = Date.now()) {
   return numeric < 10_000_000_000 ? numeric * 1000 : numeric;
 }
 
+const SKU_MAPPING: Record<string, string> = {
+  "1732503277203067045": "Chrona_BG", "1732469105697001637": "Pocket_Pro", "1732469105697067173": "L10S_Pro_Ultra",
+};
+function mappedSku(value: string) { return SKU_MAPPING[value] || value; }
+
 function hex(bytes: ArrayBuffer) {
   return [...new Uint8Array(bytes)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
@@ -129,7 +134,7 @@ async function upsertOrders(env: BiEnv, orders: JsonRecord[]) {
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index];
       const lineId = stringValue(line.id, line.order_line_item_id, line.line_item_id) || `${orderId}-${index}`;
-      const sku = stringValue(line.seller_sku, line.sku_id, line.sku_name, line.product_id) || "UNKNOWN-SKU";
+      const sku = mappedSku(stringValue(line.seller_sku, line.sku_id, line.sku_name, line.product_id) || "UNKNOWN-SKU");
       const quantity = Math.max(1, Math.round(numberValue(line.quantity, 1)));
       const unitPrice = numberValue(line.original_price ?? line.sale_price ?? line.sku_original_price, 0);
       const grossSales = unitPrice * quantity || (lines.length === 1 ? numberValue(payment.original_total_product_price ?? payment.total_amount, 0) : 0);
@@ -189,7 +194,7 @@ async function upsertReturns(env: BiEnv, returns: JsonRecord[]) {
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index];
       const lineId = stringValue(line.order_line_item_id, line.line_item_id, line.id) || `${returnId}-${index}`;
-      let sku = stringValue(line.seller_sku, line.sku_id, item.seller_sku, item.sku_id);
+      let sku = mappedSku(stringValue(line.seller_sku, line.sku_id, item.seller_sku, item.sku_id));
       if (!sku && orderId) {
         const match = await env.DB.prepare("SELECT sku FROM sales_lines WHERE order_id = ? AND (line_item_id = ? OR ? = '') ORDER BY ordered_at LIMIT 1")
           .bind(orderId, lineId, lineId).first<{ sku: string }>();
@@ -247,7 +252,7 @@ async function applyFinance(env: BiEnv, orderId: string, financeStatus: "FINAL" 
   const transactions = asArray(data.sku_transactions ?? data.transactions).map(asRecord);
   let applied = 0;
   for (const transaction of transactions) {
-    const sku = stringValue(transaction.seller_sku, transaction.sku_id, transaction.sku_name);
+    const sku = mappedSku(stringValue(transaction.seller_sku, transaction.sku_id, transaction.sku_name));
     const lineId = stringValue(transaction.order_line_item_id, transaction.line_item_id);
     const row = lineId
       ? await env.DB.prepare("SELECT id FROM sales_lines WHERE order_id = ? AND line_item_id = ? LIMIT 1").bind(orderId, lineId).first<{ id: string }>()
@@ -407,7 +412,7 @@ async function upsertAffiliate(env: BiEnv, rows: JsonRecord[]) {
     const orderId = stringValue(order.order_id, order.id);
     const items = asArray(order.sku_orders ?? order.items ?? order.order_line_items).map(asRecord);
     for (const [index, item] of (items.length ? items : [order]).entries()) {
-      const sku = stringValue(item.seller_sku, item.sku_id);
+      const sku = mappedSku(stringValue(item.seller_sku, item.sku_id));
       const id = stringValue(item.id, item.order_line_item_id) || `${orderId}:${sku}:${index}`;
       statements.push(env.DB.prepare(`INSERT INTO affiliate_orders (id,order_id,sku,created_at,content_type,raw_json,updated_at)
         VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET raw_json=excluded.raw_json,content_type=excluded.content_type,updated_at=excluded.updated_at`)
