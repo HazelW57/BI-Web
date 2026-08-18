@@ -484,7 +484,7 @@ function ReturnShareDonut({ rows, onSelect }: { rows: ReturnSku[]; onSelect: (sk
 function ReturnRateBars({ rows, onSelect }: { rows: ReturnSku[]; onSelect: (sku: string) => void }) {
   const ranked=[...rows].sort((a,b)=>b.returnRate-a.returnRate||b.returnedUnits-a.returnedUnits||b.soldUnits-a.soldUnits||a.sku.localeCompare(b.sku));
   const max = Math.max(...ranked.map((row) => row.returnRate), 1);
-  return <div className="return-rate-bars">{ranked.slice(0, 30).map((row) => <button key={row.sku} onClick={() => onSelect(row.sku)} title={`SKU: ${row.sku}\nSold Units ${number.format(row.soldUnits)}\nReturned Units ${number.format(row.returnedUnits)}\nReturn Rate ${row.returnRate.toFixed(2)}%\nRefund Amount ${preciseMoney.format(row.refundAmount)}\nTop Return Reason ${row.reasons[0]?.reason || "None"}`}><strong>{row.sku}</strong><i><u style={{ width: `${row.returnRate / max * 100}%` }} /></i><span>{row.returnRate.toFixed(2)}%</span></button>)}</div>;
+  return <div className="return-rate-bars">{ranked.map((row) => <button key={row.sku} onClick={() => onSelect(row.sku)} title={`SKU: ${row.sku}\nSold Units ${number.format(row.soldUnits)}\nReturned Units ${number.format(row.returnedUnits)}\nReturn Rate ${row.returnRate.toFixed(2)}%\nRefund Amount ${preciseMoney.format(row.refundAmount)}\nTop Return Reason ${row.reasons[0]?.reason || "None"}`}><strong>{row.sku}</strong><i><u style={{ width: `${row.returnRate / max * 100}%` }} /></i><span>{row.returnRate.toFixed(2)}%</span></button>)}</div>;
 }
 
 function ReturnTrend({ rows }: { rows: ReturnSku["trend"] }) {
