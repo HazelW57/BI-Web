@@ -25,7 +25,7 @@ type ReturnsData = {
   range: { from: string; to: string }; granularity: string; dimensions: Dimensions; soldUnits: number; returnedUnits: number;
   returnRate: number; refundAmount: number; refundGmvRate: number; returnShippingCost: number; skuCount: number;
   returnsCreatedDuringPeriod: number; skus: ReturnSku[]; sources: Source[];
-  sampleUnits?: number; commercialSoldUnits?: number;
+  totalSoldUnits?: number; sampleUnits?: number; commercialSoldUnits?: number;
 };
 type SyncData = {
   configured: boolean;
@@ -374,10 +374,10 @@ function ReturnsView({ data, previous, selectedSku, onSkuSelect }: { data: Retur
   const selected = selectedSku !== "ALL" ? data.skus.find((row) => row.sku === selectedSku) : undefined;
   return <>
     <div className="kpi-grid returns-kpis">
-      <Kpi label="SOLD UNITS" value={number.format(data.soldUnits)} current={data.soldUnits} previous={previous.soldUnits} note="Sales cohort denominator" source="TikTok Orders API" status="Actual" />
+      <Kpi label="SOLD UNITS" value={number.format(data.totalSoldUnits ?? data.soldUnits)} current={data.totalSoldUnits ?? data.soldUnits} previous={previous.totalSoldUnits ?? previous.soldUnits} note="All valid sold units, including samples" source="TikTok Orders API" status="Actual" />
       <Kpi label="SOLD UNITS · EXCL. SAMPLES" value={number.format(data.commercialSoldUnits ?? data.soldUnits)} current={data.commercialSoldUnits ?? data.soldUnits} previous={previous.commercialSoldUnits ?? previous.soldUnits} note={`${number.format(data.sampleUnits || 0)} sample units excluded`} source="TikTok Orders API order type" status="Actual" />
       <Kpi label="RETURNED UNITS" value={number.format(data.returnedUnits)} current={data.returnedUnits} previous={previous.returnedUnits} note="Completed physical returns only" source="Returns API; rejected/canceled/pending excluded" status="Actual" />
-      <Kpi label="OVERALL RETURN RATE" value={`${data.returnRate.toFixed(2)}%`} current={data.returnRate} previous={previous.returnRate} note="Returned Units ÷ Sold Units" tone={data.returnRate > 10 ? "negative" : ""} source="Sales cohort calculation" status="Actual" />
+      <Kpi label="OVERALL RETURN RATE" value={`${data.returnRate.toFixed(2)}%`} current={data.returnRate} previous={previous.returnRate} note="Non-sample Returned Units ÷ Non-sample Sold Units" tone={data.returnRate > 10 ? "negative" : ""} source="Commercial sales cohort; samples excluded" status="Actual" />
       <Kpi label="REFUND GMV RATE" value={`${data.refundGmvRate.toFixed(2)}%`} current={data.refundGmvRate} previous={previous.refundGmvRate} note={money.format(data.refundAmount)} source="TikTok Returns / Finance API" status="Actual" />
       <Kpi label="RETURNS CREATED" value={number.format(data.returnsCreatedDuringPeriod)} current={data.returnsCreatedDuringPeriod} previous={previous.returnsCreatedDuringPeriod} note="Created in selected period" source="Returns API event date" status="Actual" />
       <Kpi label="HIGHEST-RISK SKU" value={riskSku(data.skus)?.sku || "—"} note={riskSku(data.skus) ? `${riskSku(data.skus)!.returnedUnits} returns / ${riskSku(data.skus)!.soldUnits} sold` : "No completed returns"} tone="negative" source="Volume-adjusted risk score" status="Actual" />

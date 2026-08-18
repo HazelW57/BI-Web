@@ -459,7 +459,8 @@ export function calculateReturns(
   returnShippingRules: ReturnShippingRule[] = [],
   granularity: Granularity = "monthly",
 ) {
-  const validSales = sales.filter((line) => validSale(line.orderStatus));
+  // Return-rate cohort excludes creator/free sample orders from both numerator and denominator.
+  const validSales = sales.filter((line) => validSale(line.orderStatus) && !sampleSale(line));
   const salesByOrderSku = new Map(validSales.map((line) => [`${line.orderId}:${line.sku}`, line]));
   const rows = new Map<string, {
     sku: string; productName: string; soldUnits: number; gmv: number; returnedUnits: number; refundAmount: number;
@@ -660,10 +661,11 @@ export async function getReturnsSnapshot(db: D1Database, filters: SnapshotFilter
   const filteredReturns = returnsResult.results.filter((item) => skus.has(item.sku) && orders.has(item.orderId || "")
     && (!filters.returnType || filters.returnType === "ALL" || item.returnType === filters.returnType)
     && (!filters.returnStatus || filters.returnStatus === "ALL" || item.status === filters.returnStatus));
-  const sampleUnits = filteredSales.filter(sampleSale).reduce((sum,line)=>sum+line.quantity,0);
+  const totalSoldUnits = filteredSales.filter(line=>validSale(line.orderStatus)).reduce((sum,line)=>sum+line.quantity,0);
+  const sampleUnits = filteredSales.filter(line=>validSale(line.orderStatus) && sampleSale(line)).reduce((sum,line)=>sum+line.quantity,0);
   return { range: { from: range.from, to: range.to }, granularity: normalizedGranularity(filters.granularity), dimensions,
-    returnsCreatedDuringPeriod: createdResult?.count || 0, sampleUnits, commercialSoldUnits: Math.max(0,filteredSales.reduce((sum,line)=>sum+line.quantity,0)-sampleUnits), ...calculateReturns(filteredSales, filteredReturns, shippingResult.results, normalizedGranularity(filters.granularity)),
-    sources: [{ metric: "Sold Units", source: "TikTok Orders API sales cohort" }, { metric: "Returns / Reasons / Refunds", source: "TikTok Returns & Refunds API joined to original order + SKU" }, { metric: "Return Shipping", source: "Finance actual when available; uploaded per-unit rule fallback" }] };
+    returnsCreatedDuringPeriod: createdResult?.count || 0, totalSoldUnits, sampleUnits, commercialSoldUnits: Math.max(0,totalSoldUnits-sampleUnits), ...calculateReturns(filteredSales, filteredReturns, shippingResult.results, normalizedGranularity(filters.granularity)),
+    sources: [{ metric: "Return Rate", source: "TikTok Orders + Returns API commercial sales cohort; sample orders excluded from numerator and denominator" }, { metric: "Sold Units", source: "TikTok Orders API; total and non-sample counts retained separately" }, { metric: "Returns / Reasons / Refunds", source: "TikTok Returns & Refunds API joined to original non-sample order + SKU" }, { metric: "Return Shipping", source: "Finance actual when available; uploaded per-unit rule fallback" }] };
 }
 
 export async function getSyncStatus(env: BiEnv) {
