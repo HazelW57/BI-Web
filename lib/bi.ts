@@ -27,6 +27,9 @@ export type SalesFact = {
   shippingCost: number;
   returnShippingActual?: number;
   settlementAmount: number | null;
+  financeStatus?: string;
+  adjustmentAmount?: number;
+  unmappedDifference?: number;
 };
 
 export type CostFact = {
@@ -102,6 +105,10 @@ export type PnlRow = {
   shippingCost: number;
   agencyFees: number;
   contributionProfit: number;
+  adjustments: number;
+  unmappedDifference: number;
+  financeFinal: number;
+  financePending: number;
 };
 
 type PnlAccumulator = PnlRow & { orderIds: Set<string> };
@@ -166,6 +173,40 @@ const BI_SCHEMA = [
     id TEXT PRIMARY KEY, order_id TEXT NOT NULL, line_item_id TEXT NOT NULL DEFAULT '', sku TEXT NOT NULL DEFAULT '',
     raw_json TEXT NOT NULL, updated_at INTEGER NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS raw_orders (
+    id TEXT PRIMARY KEY, ordered_at INTEGER NOT NULL, raw_json TEXT NOT NULL, updated_at INTEGER NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS finance_statements (
+    id TEXT PRIMARY KEY, statement_time INTEGER NOT NULL, payment_status TEXT NOT NULL DEFAULT 'FINAL',
+    settlement_amount REAL NOT NULL DEFAULT 0, revenue_amount REAL NOT NULL DEFAULT 0,
+    fee_amount REAL NOT NULL DEFAULT 0, adjustment_amount REAL NOT NULL DEFAULT 0,
+    shipping_cost_amount REAL NOT NULL DEFAULT 0, raw_json TEXT NOT NULL, updated_at INTEGER NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS finance_transactions (
+    id TEXT PRIMARY KEY, order_id TEXT NOT NULL, line_item_id TEXT NOT NULL DEFAULT '', sku TEXT NOT NULL DEFAULT '',
+    statement_id TEXT NOT NULL DEFAULT '', finance_status TEXT NOT NULL,
+    transaction_time INTEGER NOT NULL, revenue_amount REAL NOT NULL DEFAULT 0,
+    fee_tax_amount REAL NOT NULL DEFAULT 0, shipping_cost_amount REAL NOT NULL DEFAULT 0,
+    adjustment_amount REAL NOT NULL DEFAULT 0, settlement_amount REAL NOT NULL DEFAULT 0,
+    unmapped_difference REAL NOT NULL DEFAULT 0, raw_json TEXT NOT NULL, updated_at INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_finance_order ON finance_transactions(order_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_finance_time ON finance_transactions(transaction_time)`,
+  `CREATE TABLE IF NOT EXISTS finance_components (
+    id TEXT PRIMARY KEY, finance_transaction_id TEXT NOT NULL, order_id TEXT NOT NULL,
+    component_key TEXT NOT NULL, category TEXT NOT NULL, amount REAL NOT NULL,
+    included_by_tiktok INTEGER NOT NULL DEFAULT 1, finance_status TEXT NOT NULL, raw_path TEXT NOT NULL, updated_at INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_finance_components_order ON finance_components(order_id)`,
+  `CREATE TABLE IF NOT EXISTS affiliate_orders (
+    id TEXT PRIMARY KEY, order_id TEXT NOT NULL, sku TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL,
+    content_type TEXT NOT NULL DEFAULT '', raw_json TEXT NOT NULL, updated_at INTEGER NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS sync_windows (
+    id TEXT PRIMARY KEY, source TEXT NOT NULL, window_start TEXT NOT NULL, window_end TEXT NOT NULL,
+    status TEXT NOT NULL, item_count INTEGER NOT NULL DEFAULT 0, page_count INTEGER NOT NULL DEFAULT 0,
+    cursor TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS import_runs (
     id TEXT PRIMARY KEY, kind TEXT NOT NULL, filename TEXT NOT NULL, row_count INTEGER NOT NULL,
     imported_by TEXT NOT NULL, created_at INTEGER NOT NULL
@@ -222,7 +263,8 @@ function baseRow(key: string): PnlAccumulator {
     netRevenue: 0, cogs: 0, affiliateCommission: 0, adSpend: 0, videoAgencyFees: 0,
     liveAgencyFees: 0, returnShippingCost: 0, otherCosts: 0, operatingProfit: 0, margin: 0,
     settlement: 0, estimatedReturnShipping: false, revenue: 0, platformFees: 0, shippingCost: 0,
-    agencyFees: 0, contributionProfit: 0, orderIds: new Set<string>(),
+    agencyFees: 0, contributionProfit: 0, adjustments: 0, unmappedDifference: 0,
+    financeFinal: 0, financePending: 0, orderIds: new Set<string>(),
   };
 }
 
@@ -249,7 +291,8 @@ function matchingReturnShipping(rules: ReturnShippingRule[], sku: string, ordere
 
 function addRow(target: PnlAccumulator, source: PnlAccumulator | PnlRow) {
   for (const key of ["gmv", "units", "refunds", "tiktokFees", "sellerShippingCost", "netRevenue", "cogs",
-    "affiliateCommission", "adSpend", "videoAgencyFees", "liveAgencyFees", "returnShippingCost", "otherCosts", "settlement"] as const) {
+    "affiliateCommission", "adSpend", "videoAgencyFees", "liveAgencyFees", "returnShippingCost", "otherCosts", "settlement",
+    "adjustments", "unmappedDifference", "financeFinal", "financePending"] as const) {
     target[key] += source[key];
   }
   target.estimatedReturnShipping ||= source.estimatedReturnShipping;
@@ -257,15 +300,17 @@ function addRow(target: PnlAccumulator, source: PnlAccumulator | PnlRow) {
 
 function finalize(row: PnlAccumulator): PnlRow {
   row.orders = row.orderIds.size || row.orders;
-  row.netRevenue = row.gmv - row.refunds - row.tiktokFees - row.sellerShippingCost;
-  row.operatingProfit = row.netRevenue - row.cogs - row.affiliateCommission - row.adSpend - row.videoAgencyFees
+  // Finance settlement is the authoritative TikTok Net Revenue. Affiliate and platform fees
+  // are disclosures already included by TikTok and must not be deducted a second time.
+  row.netRevenue = row.financeFinal + row.financePending || row.settlement || row.gmv - row.refunds - row.tiktokFees - row.sellerShippingCost;
+  row.operatingProfit = row.netRevenue - row.cogs - row.adSpend - row.videoAgencyFees
     - row.liveAgencyFees - row.returnShippingCost - row.otherCosts;
   row.margin = row.netRevenue ? row.operatingProfit / row.netRevenue * 100 : 0;
   row.revenue = row.netRevenue;
   row.platformFees = row.tiktokFees;
   row.shippingCost = row.sellerShippingCost;
   row.agencyFees = row.videoAgencyFees + row.liveAgencyFees;
-  row.contributionProfit = row.netRevenue - row.cogs - row.affiliateCommission;
+  row.contributionProfit = row.netRevenue - row.cogs;
   const result = { ...row } as PnlRow & { orderIds?: Set<string> };
   delete result.orderIds;
   for (const key of Object.keys(result) as (keyof PnlRow)[]) {
@@ -320,6 +365,11 @@ export function calculatePnl(
       row.sellerShippingCost += values.sellerShippingCost; row.cogs += values.cogs;
       row.affiliateCommission += values.affiliateCommission; row.units += line.quantity;
       row.settlement += line.settlementAmount ?? 0; row.orderIds.add(line.orderId);
+      row.adjustments += line.adjustmentAmount || 0; row.unmappedDifference += line.unmappedDifference || 0;
+      if (line.settlementAmount !== null) {
+        if (line.financeStatus === "ESTIMATED") row.financePending += line.settlementAmount;
+        else row.financeFinal += line.settlementAmount;
+      }
       if (line.returnShippingActual) row.returnShippingCost += Math.abs(line.returnShippingActual);
       target.set(key, row);
     }
@@ -458,7 +508,7 @@ export function calculateReturns(
 
 function periodBounds(from?: string | null, to?: string | null) {
   const endDate = to && /^\d{4}-\d{2}-\d{2}$/.test(to) ? new Date(`${to}T00:00:00.000Z`) : new Date();
-  const startDate = from && /^\d{4}-\d{2}-\d{2}$/.test(from) ? new Date(`${from}T00:00:00.000Z`) : new Date(endDate.getTime() - 89 * 86_400_000);
+  const startDate = from && /^\d{4}-\d{2}-\d{2}$/.test(from) ? new Date(`${from}T00:00:00.000Z`) : new Date("2026-02-01T00:00:00.000Z");
   return { from: dayString(startDate.getTime()), to: dayString(endDate.getTime()), start: startDate.getTime(), end: endDate.getTime() + 86_400_000 };
 }
 
@@ -469,7 +519,12 @@ function salesQuery() {
     s.financial_net_sales AS financialNetSales, s.platform_fee AS platformFee,
     s.affiliate_commission AS affiliateCommission, s.shipping_cost AS shippingCost,
     COALESCE(f.return_shipping_actual,0) AS returnShippingActual,
-    s.settlement_amount AS settlementAmount FROM sales_lines s LEFT JOIN finance_line_costs f ON f.sales_line_id=s.id`;
+    COALESCE(ft.settlementAmount,s.settlement_amount) AS settlementAmount, ft.financeStatus,
+    COALESCE(ft.adjustmentAmount,0) AS adjustmentAmount, COALESCE(ft.unmappedDifference,0) AS unmappedDifference
+    FROM sales_lines s LEFT JOIN finance_line_costs f ON f.sales_line_id=s.id
+    LEFT JOIN (SELECT order_id,line_item_id,MAX(finance_status) AS financeStatus,SUM(settlement_amount) AS settlementAmount,
+      SUM(adjustment_amount) AS adjustmentAmount,SUM(unmapped_difference) AS unmappedDifference
+      FROM finance_transactions GROUP BY order_id,line_item_id) ft ON ft.order_id=s.order_id AND (ft.line_item_id=s.line_item_id OR ft.line_item_id='')`;
 }
 
 export type SnapshotFilters = { from?: string | null; to?: string | null; granularity?: string | null; product?: string | null; sku?: string | null; returnType?: string | null; returnStatus?: string | null };

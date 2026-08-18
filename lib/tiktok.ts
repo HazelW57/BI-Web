@@ -93,7 +93,8 @@ async function fetchOrders(env: BiEnv, fromSeconds: number, toSeconds: number) {
   const path = `/order/${version}/orders/search`;
   const orders: JsonRecord[] = [];
   let pageToken = "";
-  for (let page = 0; page < 10; page += 1) {
+  const seen = new Set<string>();
+  for (let page = 0; page < 200; page += 1) {
     const data = await tiktokRequest(env, path, {
       method: "POST",
       query: {
@@ -107,6 +108,8 @@ async function fetchOrders(env: BiEnv, fromSeconds: number, toSeconds: number) {
     orders.push(...asArray(data.orders).map(asRecord));
     pageToken = stringValue(data.next_page_token, data.nextPageToken);
     if (!pageToken) break;
+    if (seen.has(pageToken)) throw new Error("Orders API returned a repeated page token");
+    seen.add(pageToken);
   }
   return orders;
 }
@@ -118,6 +121,9 @@ async function upsertOrders(env: BiEnv, orders: JsonRecord[]) {
   for (const order of orders) {
     const orderId = stringValue(order.id, order.order_id);
     if (!orderId) continue;
+    statements.push(env.DB.prepare(`INSERT INTO raw_orders (id,ordered_at,raw_json,updated_at) VALUES (?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET ordered_at=excluded.ordered_at,raw_json=excluded.raw_json,updated_at=excluded.updated_at`)
+      .bind(orderId, timestampValue(order.create_time ?? order.created_at), JSON.stringify(order), now));
     const payment = asRecord(order.payment);
     const lines = asArray(order.line_items ?? order.order_line_items).map(asRecord);
     for (let index = 0; index < lines.length; index += 1) {
@@ -154,7 +160,8 @@ async function fetchReturns(env: BiEnv, fromSeconds: number, toSeconds: number) 
   const path = `/return_refund/${version}/returns/search`;
   const returns: JsonRecord[] = [];
   let pageToken = "";
-  for (let page = 0; page < 10; page += 1) {
+  const seen = new Set<string>();
+  for (let page = 0; page < 200; page += 1) {
     const data = await tiktokRequest(env, path, {
       method: "POST",
       query: { page_size: "50", sort_field: "create_time", sort_order: "ASC", ...(pageToken ? { page_token: pageToken } : {}) },
@@ -163,6 +170,8 @@ async function fetchReturns(env: BiEnv, fromSeconds: number, toSeconds: number) 
     returns.push(...asArray(data.return_orders ?? data.returns).map(asRecord));
     pageToken = stringValue(data.next_page_token, data.nextPageToken);
     if (!pageToken) break;
+    if (seen.has(pageToken)) throw new Error("Returns API returned a repeated page token");
+    seen.add(pageToken);
   }
   return returns;
 }
@@ -207,7 +216,31 @@ async function upsertReturns(env: BiEnv, returns: JsonRecord[]) {
   return count;
 }
 
-async function applyFinance(env: BiEnv, orderId: string) {
+function componentCategory(path: string) {
+  if (/refund/i.test(path)) return "REFUND";
+  if (/affiliate|commission/i.test(path)) return "AFFILIATE_COMMISSION";
+  if (/shipping/i.test(path)) return "SHIPPING";
+  if (/advert|ads?_/i.test(path)) return "ADS_CHARGE";
+  if (/discount|promotion/i.test(path)) return "DISCOUNT";
+  if (/tax/i.test(path)) return "TAX";
+  if (/adjust/i.test(path)) return "ADJUSTMENT";
+  if (/credit|reimbursement/i.test(path)) return "CREDIT";
+  if (/fee/i.test(path)) return "PLATFORM_FEE";
+  return "OTHER";
+}
+
+function leafAmounts(value: unknown, prefix = "", output: { path: string; amount: number }[] = []) {
+  if (!value || typeof value !== "object") return output;
+  for (const [key, child] of Object.entries(value as JsonRecord)) {
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (/_amount$/i.test(key) && (typeof child === "string" || typeof child === "number" || asRecord(child).amount !== undefined)) {
+      output.push({ path, amount: numberValue(child, 0) });
+    } else if (child && typeof child === "object") leafAmounts(child, path, output);
+  }
+  return output;
+}
+
+async function applyFinance(env: BiEnv, orderId: string, financeStatus: "FINAL" | "ESTIMATED" = "FINAL") {
   const version = env.TIKTOK_FINANCE_API_VERSION || "202501";
   const path = `/finance/${version}/orders/${encodeURIComponent(orderId)}/statement_transactions`;
   const data = await tiktokRequest(env, path);
@@ -223,6 +256,8 @@ async function applyFinance(env: BiEnv, orderId: string) {
     const feeAndTax = Math.abs(numberValue(transaction.fee_and_tax_amount ?? transaction.fee_tax_amount, 0));
     const shipping = Math.abs(numberValue(transaction.shipping_cost_amount, 0));
     const settlement = numberValue(transaction.settlement_amount, 0);
+    const adjustment = numberValue(transaction.adjustment_amount, 0);
+    const unmapped = settlement - (revenue + numberValue(transaction.fee_and_tax_amount ?? transaction.fee_tax_amount, 0) + numberValue(transaction.shipping_cost_amount, 0) + adjustment);
     const affiliate = Math.abs(firstNamedAmount(transaction, /affiliate.*commission.*amount/i));
     const fee = Math.max(0, feeAndTax - affiliate);
     const refund = Math.abs(firstNamedAmount(transaction, /gross.*sales.*refund.*amount|refund.*amount/i));
@@ -237,6 +272,21 @@ async function applyFinance(env: BiEnv, orderId: string) {
     await env.DB.prepare(`INSERT INTO raw_finance_transactions (id,order_id,line_item_id,sku,raw_json,updated_at) VALUES (?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET raw_json=excluded.raw_json,updated_at=excluded.updated_at`)
       .bind(transactionId, orderId, lineId, sku, JSON.stringify(transaction), Date.now()).run();
+    await env.DB.prepare(`INSERT INTO finance_transactions
+      (id,order_id,line_item_id,sku,statement_id,finance_status,transaction_time,revenue_amount,fee_tax_amount,shipping_cost_amount,adjustment_amount,settlement_amount,unmapped_difference,raw_json,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET finance_status=excluded.finance_status,
+      revenue_amount=excluded.revenue_amount,fee_tax_amount=excluded.fee_tax_amount,shipping_cost_amount=excluded.shipping_cost_amount,
+      adjustment_amount=excluded.adjustment_amount,settlement_amount=excluded.settlement_amount,
+      unmapped_difference=excluded.unmapped_difference,raw_json=excluded.raw_json,updated_at=excluded.updated_at`)
+      .bind(transactionId, orderId, lineId, sku, stringValue(transaction.statement_id), financeStatus,
+        timestampValue(transaction.order_create_time ?? transaction.create_time), revenue,
+        numberValue(transaction.fee_and_tax_amount ?? transaction.fee_tax_amount, 0), numberValue(transaction.shipping_cost_amount, 0),
+        adjustment, settlement, unmapped, JSON.stringify(transaction), Date.now()).run();
+    const components = leafAmounts(transaction).filter((item) => !/^(revenue|fee_and_tax|fee_tax|shipping_cost|adjustment|settlement)_amount$/i.test(item.path));
+    await runBatches(env.DB, components.map((item, index) => env.DB.prepare(`INSERT INTO finance_components
+      (id,finance_transaction_id,order_id,component_key,category,amount,included_by_tiktok,finance_status,raw_path,updated_at)
+      VALUES (?,?,?,?,?,?,1,?,?,?) ON CONFLICT(id) DO UPDATE SET amount=excluded.amount,finance_status=excluded.finance_status,updated_at=excluded.updated_at`)
+      .bind(`${transactionId}:${index}:${item.path}`, transactionId, orderId, item.path.split(".").at(-1), componentCategory(item.path), item.amount, financeStatus, item.path, Date.now())));
   }
 }
 
@@ -276,5 +326,76 @@ export async function syncTikTok(env: BiEnv, days = 7) {
     const message = error instanceof Error ? error.message : "TikTok sync failed";
     await env.DB.prepare("UPDATE sync_runs SET status='failed', message=?, completed_at=? WHERE id=?").bind(message, Date.now(), id).run();
     throw error;
+  }
+}
+
+async function fetchAffiliate(env: BiEnv, fromSeconds: number, toSeconds: number) {
+  const path = "/affiliate_seller/202410/orders/search";
+  const rows: JsonRecord[] = [];
+  let pageToken = "";
+  const seen = new Set<string>();
+  for (let page = 0; page < 200; page += 1) {
+    const data = await tiktokRequest(env, path, { method: "POST", query: { page_size: "100", ...(pageToken ? { page_token: pageToken } : {}) }, body: { create_time_ge: fromSeconds, create_time_lt: toSeconds } });
+    rows.push(...asArray(data.orders ?? data.affiliate_orders).map(asRecord));
+    pageToken = stringValue(data.next_page_token);
+    if (!pageToken) break;
+    if (seen.has(pageToken)) throw new Error("Affiliate API returned a repeated page token");
+    seen.add(pageToken);
+  }
+  return rows;
+}
+
+async function upsertAffiliate(env: BiEnv, rows: JsonRecord[]) {
+  const now = Date.now();
+  const statements: D1PreparedStatement[] = [];
+  for (const order of rows) {
+    const orderId = stringValue(order.order_id, order.id);
+    const items = asArray(order.sku_orders ?? order.items ?? order.order_line_items).map(asRecord);
+    for (const [index, item] of (items.length ? items : [order]).entries()) {
+      const sku = stringValue(item.seller_sku, item.sku_id);
+      const id = stringValue(item.id, item.order_line_item_id) || `${orderId}:${sku}:${index}`;
+      statements.push(env.DB.prepare(`INSERT INTO affiliate_orders (id,order_id,sku,created_at,content_type,raw_json,updated_at)
+        VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET raw_json=excluded.raw_json,content_type=excluded.content_type,updated_at=excluded.updated_at`)
+        .bind(id, orderId, sku, timestampValue(order.create_time), stringValue(item.content_type, order.content_type), JSON.stringify({ order, item }), now));
+    }
+  }
+  await runBatches(env.DB, statements);
+  return statements.length;
+}
+
+export async function syncTikTokWindow(env: BiEnv, from: string, to: string, financeOffset = 0) {
+  await ensureBiSchema(env.DB); validateConfig(env);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || from >= to) throw new Error("Invalid sync window");
+  const fromSeconds = Math.floor(Date.parse(`${from}T00:00:00Z`) / 1000);
+  const toSeconds = Math.floor(Date.parse(`${to}T00:00:00Z`) / 1000);
+  const id = `tiktok:${from}:${to}`; const startedAt = Date.now();
+  await env.DB.prepare(`INSERT INTO sync_runs (id,source,status,started_at) VALUES (?,'tiktok-backfill','running',?)
+    ON CONFLICT(id) DO UPDATE SET status='running',started_at=excluded.started_at`).bind(id, startedAt).run();
+  try {
+    const orders = await fetchOrders(env, fromSeconds, toSeconds);
+    const ordersUpserted = await upsertOrders(env, orders);
+    const returns = await fetchReturns(env, fromSeconds, toSeconds);
+    const returnsUpserted = await upsertReturns(env, returns);
+    let affiliateUpserted = 0; let affiliateWarning = "";
+    try { affiliateUpserted = await upsertAffiliate(env, await fetchAffiliate(env, fromSeconds, toSeconds)); }
+    catch (error) { affiliateWarning = error instanceof Error ? error.message : "Affiliate API unavailable"; }
+    const financeOrders = await env.DB.prepare(`SELECT DISTINCT order_id AS orderId FROM sales_lines WHERE ordered_at>=? AND ordered_at<? ORDER BY ordered_at LIMIT 25 OFFSET ?`)
+      .bind(fromSeconds * 1000, toSeconds * 1000, Math.max(0, financeOffset)).all<{ orderId: string }>();
+    let financeUpserted = 0; const financeWarnings: string[] = [];
+    for (const { orderId } of financeOrders.results) {
+      try { await applyFinance(env, orderId); financeUpserted += 1; }
+      catch (error) { financeWarnings.push(error instanceof Error ? error.message : orderId); }
+    }
+    const nextFinanceOffset = financeOrders.results.length === 25 ? financeOffset + 25 : null;
+    const message = `Window ${from}→${to}: ${ordersUpserted} sales lines, ${returnsUpserted} returns, ${financeUpserted} finance orders${affiliateWarning ? "; Affiliate permission pending" : ""}`;
+    await env.DB.prepare(`INSERT INTO sync_windows (id,source,window_start,window_end,status,item_count,page_count,cursor,message,updated_at)
+      VALUES (?,'tiktok',?,?,?, ?,0,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,item_count=excluded.item_count,cursor=excluded.cursor,message=excluded.message,updated_at=excluded.updated_at`)
+      .bind(id, from, to, nextFinanceOffset === null ? "complete" : "finance_pending", ordersUpserted + returnsUpserted + affiliateUpserted, nextFinanceOffset === null ? "" : String(nextFinanceOffset), message, Date.now()).run();
+    await env.DB.prepare(`UPDATE sync_runs SET status='success',orders_upserted=?,returns_upserted=?,message=?,completed_at=? WHERE id=?`)
+      .bind(ordersUpserted, returnsUpserted, `${message}${financeWarnings.length ? `; ${financeWarnings.length} finance warnings` : ""}`, Date.now(), id).run();
+    return { id, from, to, ordersUpserted, returnsUpserted, affiliateUpserted, financeUpserted, nextFinanceOffset, affiliateWarning, financeWarnings: financeWarnings.slice(0, 3) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "TikTok backfill failed";
+    await env.DB.prepare("UPDATE sync_runs SET status='failed',message=?,completed_at=? WHERE id=?").bind(message, Date.now(), id).run(); throw error;
   }
 }

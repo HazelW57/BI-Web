@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { getSession, isAdmin } from "../../../auth";
 import { getSyncStatus } from "../../../../lib/bi";
-import { syncTikTok } from "../../../../lib/tiktok";
+import { syncTikTok, syncTikTokWindow } from "../../../../lib/tiktok";
 
 export async function GET() {
   if (!(await getSession())) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -12,8 +12,9 @@ export async function GET() {
 export async function POST(request: Request) {
   const session = await getSession();
   if (!session || !isAdmin(session)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  const body = await request.json().catch(() => ({})) as { days?: number };
+  const body = await request.json().catch(() => ({})) as { days?: number; from?: string; to?: string; financeOffset?: number };
   try {
+    if (body.from && body.to) return NextResponse.json(await syncTikTokWindow(env, body.from, body.to, Number(body.financeOffset) || 0));
     return NextResponse.json(await syncTikTok(env, Number(body.days) || 7));
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "同步失败" }, { status: 502 });

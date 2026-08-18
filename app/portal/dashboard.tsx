@@ -9,6 +9,7 @@ type PnlRow = {
   sellerShippingCost: number; netRevenue: number; cogs: number; affiliateCommission: number; adSpend: number;
   videoAgencyFees: number; liveAgencyFees: number; returnShippingCost: number; otherCosts: number;
   operatingProfit: number; margin: number; settlement: number; estimatedReturnShipping: boolean;
+  adjustments: number; unmappedDifference: number; financeFinal: number; financePending: number;
 };
 type Source = { metric: string; source: string; status?: string };
 type Dimensions = { products: string[]; skus: string[]; returnTypes?: string[]; returnStatuses?: string[] };
@@ -35,7 +36,7 @@ type TtsTab = "pnl" | "sales" | "marketing" | "returns" | "costs" | "health";
 type SettingsTab = "access" | "uploads";
 type Granularity = "daily" | "weekly" | "monthly";
 
-const emptyRow: PnlRow = { key: "total", gmv: 0, orders: 0, units: 0, refunds: 0, tiktokFees: 0, sellerShippingCost: 0, netRevenue: 0, cogs: 0, affiliateCommission: 0, adSpend: 0, videoAgencyFees: 0, liveAgencyFees: 0, returnShippingCost: 0, otherCosts: 0, operatingProfit: 0, margin: 0, settlement: 0, estimatedReturnShipping: false };
+const emptyRow: PnlRow = { key: "total", gmv: 0, orders: 0, units: 0, refunds: 0, tiktokFees: 0, sellerShippingCost: 0, netRevenue: 0, cogs: 0, affiliateCommission: 0, adSpend: 0, videoAgencyFees: 0, liveAgencyFees: 0, returnShippingCost: 0, otherCosts: 0, operatingProfit: 0, margin: 0, settlement: 0, estimatedReturnShipping: false, adjustments: 0, unmappedDifference: 0, financeFinal: 0, financePending: 0 };
 const emptyDimensions: Dimensions = { products: [], skus: [], returnTypes: [], returnStatuses: [] };
 const emptyPnl: PnlData = { range: { from: "", to: "" }, granularity: "monthly", dimensions: emptyDimensions, total: emptyRow, trend: [], months: [], skus: [], sources: [] };
 const emptyReturns: ReturnsData = { range: { from: "", to: "" }, granularity: "monthly", dimensions: emptyDimensions, soldUnits: 0, returnedUnits: 0, returnRate: 0, refundAmount: 0, refundGmvRate: 0, returnShippingCost: 0, skuCount: 0, returnsCreatedDuringPeriod: 0, skus: [], sources: [] };
@@ -52,7 +53,7 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
   const [tab, setTab] = useState<Tab>("tts");
   const [ttsTab, setTtsTab] = useState<TtsTab>("pnl");
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("uploads");
-  const [from, setFrom] = useState(dateInput(new Date(today.getTime() - 89 * 86_400_000)));
+  const [from, setFrom] = useState("2026-02-01");
   const [to, setTo] = useState(dateInput(today));
   const [granularity, setGranularity] = useState<Granularity>("monthly");
   const [product, setProduct] = useState("ALL");
