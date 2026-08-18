@@ -245,6 +245,7 @@ async function applyFinance(env: BiEnv, orderId: string, financeStatus: "FINAL" 
   const path = `/finance/${version}/orders/${encodeURIComponent(orderId)}/statement_transactions`;
   const data = await tiktokRequest(env, path);
   const transactions = asArray(data.sku_transactions ?? data.transactions).map(asRecord);
+  let applied = 0;
   for (const transaction of transactions) {
     const sku = stringValue(transaction.seller_sku, transaction.sku_id, transaction.sku_name);
     const lineId = stringValue(transaction.order_line_item_id, transaction.line_item_id);
@@ -287,7 +288,38 @@ async function applyFinance(env: BiEnv, orderId: string, financeStatus: "FINAL" 
       (id,finance_transaction_id,order_id,component_key,category,amount,included_by_tiktok,finance_status,raw_path,updated_at)
       VALUES (?,?,?,?,?,?,1,?,?,?) ON CONFLICT(id) DO UPDATE SET amount=excluded.amount,finance_status=excluded.finance_status,updated_at=excluded.updated_at`)
       .bind(`${transactionId}:${index}:${item.path}`, transactionId, orderId, item.path.split(".").at(-1), componentCategory(item.path), item.amount, financeStatus, item.path, Date.now())));
+    applied += 1;
   }
+  return applied;
+}
+
+export async function syncFinanceBatch(env: BiEnv, limit = 25) {
+  await ensureBiSchema(env.DB); validateConfig(env);
+  const safeLimit = Math.min(Math.max(Math.round(limit), 1), 25);
+  const orders = await env.DB.prepare(`SELECT DISTINCT s.order_id AS orderId FROM sales_lines s
+    LEFT JOIN finance_order_checks c ON c.order_id=s.order_id
+    WHERE c.order_id IS NULL AND s.order_status NOT LIKE '%CANCEL%' AND s.order_status NOT LIKE '%UNPAID%'
+    ORDER BY s.ordered_at LIMIT ?`).bind(safeLimit).all<{ orderId: string }>();
+  const results = await Promise.all(orders.results.map(async ({ orderId }) => {
+    try {
+      const count = await applyFinance(env, orderId);
+      await env.DB.prepare(`INSERT INTO finance_order_checks(order_id,status,transaction_count,message,checked_at) VALUES (?,?,?,?,?)
+        ON CONFLICT(order_id) DO UPDATE SET status=excluded.status,transaction_count=excluded.transaction_count,message=excluded.message,checked_at=excluded.checked_at`)
+        .bind(orderId, count ? "FINAL" : "NO_FINAL_STATEMENT", count, "", Date.now()).run();
+      return { orderId, count, status: count ? "FINAL" : "NO_FINAL_STATEMENT" };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Finance API failed";
+      await env.DB.prepare(`INSERT INTO finance_order_checks(order_id,status,transaction_count,message,checked_at) VALUES (?,'ERROR',0,?,?)
+        ON CONFLICT(order_id) DO UPDATE SET status='ERROR',message=excluded.message,checked_at=excluded.checked_at`).bind(orderId, message.slice(0, 500), Date.now()).run();
+      return { orderId, count: 0, status: "ERROR" };
+    }
+  }));
+  const remaining = await env.DB.prepare(`SELECT COUNT(DISTINCT s.order_id) AS count FROM sales_lines s
+    LEFT JOIN finance_order_checks c ON c.order_id=s.order_id WHERE c.order_id IS NULL
+    AND s.order_status NOT LIKE '%CANCEL%' AND s.order_status NOT LIKE '%UNPAID%'`).first<{ count: number }>();
+  return { checked: results.length, transactions: results.reduce((sum, row) => sum + row.count, 0),
+    final: results.filter((row) => row.status === "FINAL").length, noFinalStatement: results.filter((row) => row.status === "NO_FINAL_STATEMENT").length,
+    errors: results.filter((row) => row.status === "ERROR").length, remaining: remaining?.count || 0 };
 }
 
 function validateConfig(env: BiEnv) {

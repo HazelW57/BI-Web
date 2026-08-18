@@ -207,6 +207,10 @@ const BI_SCHEMA = [
     status TEXT NOT NULL, item_count INTEGER NOT NULL DEFAULT 0, page_count INTEGER NOT NULL DEFAULT 0,
     cursor TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS finance_order_checks (
+    order_id TEXT PRIMARY KEY, status TEXT NOT NULL, transaction_count INTEGER NOT NULL DEFAULT 0,
+    message TEXT NOT NULL DEFAULT '', checked_at INTEGER NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS import_runs (
     id TEXT PRIMARY KEY, kind TEXT NOT NULL, filename TEXT NOT NULL, row_count INTEGER NOT NULL,
     imported_by TEXT NOT NULL, created_at INTEGER NOT NULL
@@ -564,7 +568,20 @@ export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = 
     granularity: normalizedGranularity(filters.granularity), returns: returnsResult.results.filter((item) => allowedSkus.has(item.sku) && allowedOrders.has(item.orderId || "")),
     agencyRules: agencyResult.results, returnShippingRules: shippingResult.results, manualCosts: manualResult.results,
   });
+  const strictFinance = (row: PnlRow) => {
+    const netRevenue = row.financeFinal + row.financePending;
+    const operatingProfit = netRevenue - row.cogs - row.adSpend - row.videoAgencyFees - row.liveAgencyFees - row.returnShippingCost - row.otherCosts;
+    return { ...row, netRevenue: round(netRevenue), revenue: round(netRevenue), operatingProfit: round(operatingProfit),
+      contributionProfit: round(netRevenue - row.cogs), margin: netRevenue ? round(operatingProfit / netRevenue * 100) : 0 };
+  };
+  const financeMappedLines = filtered.filter((line) => line.settlementAmount !== null).length;
+  const financeCoverage = { mappedLines: financeMappedLines, totalLines: filtered.length,
+    percent: filtered.length ? round(financeMappedLines / filtered.length * 100) : 0,
+    status: financeMappedLines === filtered.length ? "complete" : "incomplete" };
+  const reconciled = { total: strictFinance(calculated.total), trend: calculated.trend.map(strictFinance),
+    months: calculated.months.map(strictFinance), skus: calculated.skus.map(strictFinance) };
   return { range: { from: range.from, to: range.to }, granularity: normalizedGranularity(filters.granularity), dimensions, ...calculated,
+    ...reconciled, financeCoverage,
     sources: [
       { metric: "GMV / Orders / Units", source: "TikTok Orders API", status: "actual" },
       { metric: "Refunds / TikTok Fees / Shipping / Affiliate", source: "TikTok Finance API", status: "actual-or-pending" },
@@ -613,7 +630,9 @@ export async function getSyncStatus(env: BiEnv) {
     (SELECT COUNT(*) FROM product_cost_rules) AS productCostRules,
     (SELECT COUNT(*) FROM agency_fee_rules) AS agencyRules,
     (SELECT COUNT(*) FROM return_shipping_rules) AS returnShippingRules,
-    (SELECT COUNT(*) FROM manual_costs) AS manualCosts`).first();
+    (SELECT COUNT(*) FROM manual_costs) AS manualCosts,
+    (SELECT COUNT(DISTINCT order_id) FROM finance_transactions) AS financeOrders,
+    (SELECT COUNT(DISTINCT order_id) FROM sales_lines WHERE order_status NOT LIKE '%CANCEL%' AND order_status NOT LIKE '%UNPAID%') AS validOrders`).first();
   return {
     configured: Boolean(env.TIKTOK_APP_KEY && env.TIKTOK_APP_SECRET && env.TIKTOK_ACCESS_TOKEN && env.TIKTOK_SHOP_CIPHER),
     lastRun, counts,

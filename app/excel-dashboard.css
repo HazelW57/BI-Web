@@ -7,4 +7,5 @@
 .management-signals div{display:grid;gap:5px;padding-bottom:18px;border-bottom:1px solid var(--line)}
 .management-signals b{font-size:8px;color:var(--royal);letter-spacing:.08em}
 .management-signals span{font-size:10px;line-height:1.5;color:var(--ink)}
+.data-warning{display:flex;gap:12px;align-items:center;padding:11px 14px;margin-top:12px;border:1px solid #f2c66d;background:#fff8e8;color:#7a5411;font-size:9px}.data-warning strong{white-space:nowrap}.data-warning span{line-height:1.45}
 @media(max-width:980px){.excel-hero-grid{grid-template-columns:1fr}}

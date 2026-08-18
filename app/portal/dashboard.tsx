@@ -13,7 +13,7 @@ type PnlRow = {
 };
 type Source = { metric: string; source: string; status?: string };
 type Dimensions = { products: string[]; skus: string[]; returnTypes?: string[]; returnStatuses?: string[] };
-type PnlData = { range: { from: string; to: string }; granularity: string; dimensions: Dimensions; total: PnlRow; trend: PnlRow[]; months: PnlRow[]; skus: PnlRow[]; sources: Source[] };
+type PnlData = { range: { from: string; to: string }; granularity: string; dimensions: Dimensions; total: PnlRow; trend: PnlRow[]; months: PnlRow[]; skus: PnlRow[]; sources: Source[]; financeCoverage?: { mappedLines: number; totalLines: number; percent: number; status: string } };
 type Reason = { reason: string; count: number; share: number; refundAmount: number };
 type ReturnSku = {
   sku: string; productName: string; soldUnits: number; returnedUnits: number; returnRate: number; refundAmount: number;
@@ -29,7 +29,7 @@ type ReturnsData = {
 type SyncData = {
   configured: boolean;
   lastRun: null | { status: string; ordersUpserted: number; returnsUpserted: number; message: string; startedAt: number; completedAt: number | null };
-  counts?: { salesLines: number; returnLines: number; productCostRules: number; agencyRules: number; returnShippingRules: number; manualCosts: number };
+  counts?: { salesLines: number; returnLines: number; productCostRules: number; agencyRules: number; returnShippingRules: number; manualCosts: number; financeOrders: number; validOrders: number };
 };
 type Tab = "bby" | "walmart" | "pricing" | "tts" | "settings";
 type TtsTab = "pnl" | "sales" | "marketing" | "returns" | "costs" | "health";
@@ -80,8 +80,9 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
     setBusy(true); setError("");
     try {
       const query = new URLSearchParams({ from, to, granularity, product, sku, returnType, returnStatus });
+      const returnsQuery = new URLSearchParams({ from, to, granularity, product, sku: "ALL", returnType, returnStatus });
       const [pnlData, returnsData, syncData] = await Promise.all([
-        getJson<PnlData>(`/api/bi/pnl?${query}`), getJson<ReturnsData>(`/api/bi/returns?${query}`), getJson<SyncData>("/api/bi/sync"),
+        getJson<PnlData>(`/api/bi/pnl?${query}`), getJson<ReturnsData>(`/api/bi/returns?${returnsQuery}`), getJson<SyncData>("/api/bi/sync"),
       ]);
       setPnl(pnlData); setReturns(returnsData); setSync(syncData);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "数据读取失败"); }
@@ -232,10 +233,11 @@ function PnlView({ data, admin, onOpenCosts, onSkuSelect }: { data: PnlData; adm
       <Kpi label="GMV" value={money.format(total.gmv)} note={`${data.range.from} — ${data.range.to}`} source="TikTok Orders API" />
       <Kpi label="ORDERS" value={number.format(total.orders)} note="Valid paid orders" source="TikTok Orders API; canceled/unpaid excluded" />
       <Kpi label="UNITS SOLD" value={number.format(total.units)} note="Valid order line quantity" source="TikTok Orders API" />
-      <Kpi label="NET REVENUE" value={money.format(total.netRevenue)} note="GMV − refunds − fees − seller shipping" source="Orders + TikTok Finance API" />
+      <Kpi label="NET REVENUE" value={money.format(total.netRevenue)} note={`TikTok Settlement · Finance coverage ${data.financeCoverage?.percent ?? 0}%`} source="TikTok Finance API only; missing finance is not estimated as GMV" />
       <Kpi label="OPERATING PROFIT" value={money.format(total.operatingProfit)} note="After all management costs" tone={total.operatingProfit < 0 ? "negative" : "positive"} source="Management P&L formula" />
       <Kpi label="OPERATING MARGIN" value={`${total.margin.toFixed(1)}%`} note="Operating Profit ÷ Net Revenue" tone={total.margin < 0 ? "negative" : "positive"} source="Calculated management metric" />
     </div>
+    {data.financeCoverage?.status !== "complete" && <div className="data-warning"><strong>Finance data incomplete</strong><span>{number.format(data.financeCoverage?.mappedLines || 0)} / {number.format(data.financeCoverage?.totalLines || 0)} sales lines mapped. Net Revenue, Cost and Profit only include reconciled Finance records.</span></div>}
     <div className="cost-strip">{costMetrics.map(([label, value, source]) => <article key={label} title={`Source: ${source}`}><span>{label}<i>i</i></span><strong>{money.format(value)}</strong><small>{percentOf(value, total.gmv)}</small></article>)}</div>
 
     <div className="dashboard-grid excel-hero-grid">
@@ -287,7 +289,7 @@ function Waterfall({ total }: { total: PnlRow }) {
 function CostDonut({ total }: { total: PnlRow }) {
   const parts = [{ label: "COGS", value: total.cogs }, { label: "Affiliate", value: total.affiliateCommission }, { label: "Ad Spend", value: total.adSpend }, { label: "TikTok Fees", value: total.tiktokFees }, { label: "Agency", value: total.videoAgencyFees + total.liveAgencyFees }, { label: "Shipping + Other", value: total.sellerShippingCost + total.returnShippingCost + total.otherCosts }].filter((part) => part.value > 0);
   const sum = parts.reduce((value, part) => value + part.value, 0); let angle = 0; const gradient = parts.map((part, index) => { const start = angle; angle += part.value / sum * 360; return `${palette[index]} ${start}deg ${angle}deg`; }).join(",");
-  return <div className="cost-donut-card"><div className="return-donut" style={{ background: `conic-gradient(${gradient || "#e6eef8 0deg 360deg"})` }}><span><b>{money.format(sum)}</b><small>modeled cost</small></span></div><div className="donut-legend">{parts.map((part, index) => <div key={part.label}><i style={{ background: palette[index] }} /><span>{part.label}</span><b>{sum ? (part.value / sum * 100).toFixed(1) : 0}%</b></div>)}</div></div>;
+  return <div className="cost-donut-card"><div className="return-donut" style={{ background: `conic-gradient(${gradient || "#e6eef8 0deg 360deg"})` }} title={parts.map((part) => `${part.label}: ${preciseMoney.format(part.value)} · ${sum ? (part.value / sum * 100).toFixed(2) : 0}%`).join("\n")}><span><b>{money.format(sum)}</b><small>modeled cost</small></span></div><div className="donut-legend">{parts.map((part, index) => <div key={part.label} title={`${part.label}\n${preciseMoney.format(part.value)}\n${sum ? (part.value / sum * 100).toFixed(2) : 0}% of cost`}><i style={{ background: palette[index] }} /><span>{part.label}</span><b>{sum ? (part.value / sum * 100).toFixed(1) : 0}%</b></div>)}</div></div>;
 }
 
 function ManagementSignals({ total, skus }: { total: PnlRow; skus: PnlRow[] }) {
