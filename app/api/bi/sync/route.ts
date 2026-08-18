@@ -6,7 +6,8 @@ import { backfillAffiliate, syncAffiliateFinanceBatch, syncAffiliateWindow, sync
 
 export async function GET() {
   if (!(await getSession())) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  return NextResponse.json(await getSyncStatus(env));
+  try { return NextResponse.json(await getSyncStatus(env)); }
+  catch(error) { console.error("TTS sync status read failed",error); return NextResponse.json({error:error instanceof Error?error.message:"TTS sync status unavailable"},{status:500}); }
 }
 
 export async function POST(request: Request) {
