@@ -19,6 +19,27 @@
       "database_name": "saphiant-bi",
       "database_id": "617aae68-2af6-42b1-8f96-77f648708742",
       "migrations_dir": "migrations"
+    },
+    {
+      "binding": "TTS_DB",
+      "database_name": "saphiant-bi",
+      "database_id": "617aae68-2af6-42b1-8f96-77f648708742",
+      "migrations_dir": "migrations"
+    },
+    {
+      "binding": "BBY_SAP_DB",
+      "database_name": "saphiant-bi-bby-sap",
+      "database_id": "a075503f-7d2d-4b5f-becf-eb2ee4cd811d"
+    },
+    {
+      "binding": "BBY_JS_DB",
+      "database_name": "saphiant-bi-bby-js",
+      "database_id": "5feab891-35fb-4ca7-84c7-0affb6c9cbe0"
+    },
+    {
+      "binding": "WALMART_DB",
+      "database_name": "saphiant-bi-walmart",
+      "database_id": "215ed53f-6aef-4bc7-b6e3-07d08fdd4218"
     }
   ],
   "images": {
