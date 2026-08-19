@@ -579,6 +579,7 @@ function filterSales(sales: SalesFact[], filters: SnapshotFilters) {
 
 export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = {}) {
   const range = periodBounds(filters.from, filters.to);
+  const coverage = await db.prepare("SELECT MAX(ordered_at) AS latest FROM sales_lines").first<{latest:number|null}>();
   // Keep the dashboard read on a single D1 batch. Opening ten concurrent D1
   // queries from one request intermittently exhausted the Worker connection
   // budget and surfaced as a slow HTTP 500 even though the data was healthy.
@@ -655,7 +656,7 @@ export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = 
   const orderMix = { commercialOrders: new Set(commercialLines.map(line => line.orderId)).size, sampleOrders: new Set(sampleLines.map(line => line.orderId)).size,
     returnedOrders: new Set(returnsResult.results.filter(item => completedReturn(item.status)).map(item => item.orderId).filter(Boolean)).size,
     commercialUnits: commercialLines.reduce((sum,line)=>sum+line.quantity,0), sampleUnits: sampleLines.reduce((sum,line)=>sum+line.quantity,0) };
-  return { range: { from: range.from, to: range.to }, granularity: normalizedGranularity(filters.granularity), dimensions, ...calculated,
+  return { range: { from: range.from, to: range.to }, dataThrough: coverage?.latest ? new Date(coverage.latest).toISOString().slice(0,10) : null, granularity: normalizedGranularity(filters.granularity), dimensions, ...calculated,
     ...reconciled, financeCoverage, affiliateCoverage, orderMix,
     sources: [
       { metric: "GMV / Orders / Units", source: "TikTok Orders API", status: "actual" },
