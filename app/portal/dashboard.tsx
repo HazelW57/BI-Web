@@ -95,6 +95,16 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
   const [items, setItems] = useState(initialAllowed);
   const [newEmail, setNewEmail] = useState("");
 
+  // Date filters are channel-scoped. Reset the visible range when switching
+  // channel/store, then let that channel's dataThrough value clamp Date To.
+  useEffect(() => {
+    setFrom("2026-05-01");
+    setTo(dateInput(today));
+    setMaxDate(dateInput(today));
+    setProduct("ALL");
+    setSku("ALL");
+  }, [tab, bbyStore, today]);
+
   const getJson = useCallback(async <T,>(url: string, init?: RequestInit) => {
     const response = await fetch(url, { cache: "no-store", ...init });
     const text = await response.text();
