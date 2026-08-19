@@ -579,24 +579,27 @@ function filterSales(sales: SalesFact[], filters: SnapshotFilters) {
 
 export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = {}) {
   const range = periodBounds(filters.from, filters.to);
-  const [salesResult, legacyCosts, costsResult, expensesResult, agencyResult, shippingResult, manualResult, returnsResult, statementsResult, affiliateResult] = await Promise.all([
-    db.prepare(`${salesQuery()} WHERE s.ordered_at >= ? AND s.ordered_at < ? ORDER BY s.ordered_at`).bind(range.start, range.end).all<SalesFact>(),
-    db.prepare("SELECT sku, effective_from AS effectiveFrom, product_cost AS productCost FROM sku_costs ORDER BY effective_from").all<CostFact>(),
-    db.prepare("SELECT seller_sku AS sku, product_name AS productName, unit_cost AS productCost, effective_from AS effectiveFrom, effective_to AS effectiveTo FROM product_cost_rules ORDER BY effective_from").all<CostFact>(),
-    db.prepare("SELECT month, kind, amount FROM period_expenses WHERE month >= ? AND month <= ? ORDER BY month").bind(range.from.slice(0, 7), range.to.slice(0, 7)).all<ExpenseFact>(),
-    db.prepare("SELECT fee_name AS feeName, fee_category AS feeCategory, scope_type AS scopeType, scope_value AS scopeValue, calculation_method AS method, rate_amount AS rate, effective_from AS effectiveFrom, effective_to AS effectiveTo FROM agency_fee_rules").all<AgencyRule>(),
-    db.prepare("SELECT seller_sku AS sku, cost_per_unit AS costPerUnit, effective_from AS effectiveFrom, effective_to AS effectiveTo FROM return_shipping_rules ORDER BY effective_from").all<ReturnShippingRule>(),
-    db.prepare("SELECT period, cost_category AS category, seller_sku AS sku, amount FROM manual_costs WHERE period >= ? AND period <= ?").bind(range.from.slice(0, 7), range.to).all<ManualCost>(),
+  // Keep the dashboard read on a single D1 batch. Opening ten concurrent D1
+  // queries from one request intermittently exhausted the Worker connection
+  // budget and surfaced as a slow HTTP 500 even though the data was healthy.
+  const [salesResult, legacyCosts, costsResult, expensesResult, agencyResult, shippingResult, manualResult, returnsResult, statementsResult, affiliateResult] = await db.batch([
+    db.prepare(`${salesQuery()} WHERE s.ordered_at >= ? AND s.ordered_at < ? ORDER BY s.ordered_at`).bind(range.start, range.end),
+    db.prepare("SELECT sku, effective_from AS effectiveFrom, product_cost AS productCost FROM sku_costs ORDER BY effective_from"),
+    db.prepare("SELECT seller_sku AS sku, product_name AS productName, unit_cost AS productCost, effective_from AS effectiveFrom, effective_to AS effectiveTo FROM product_cost_rules ORDER BY effective_from"),
+    db.prepare("SELECT month, kind, amount FROM period_expenses WHERE month >= ? AND month <= ? ORDER BY month").bind(range.from.slice(0, 7), range.to.slice(0, 7)),
+    db.prepare("SELECT fee_name AS feeName, fee_category AS feeCategory, scope_type AS scopeType, scope_value AS scopeValue, calculation_method AS method, rate_amount AS rate, effective_from AS effectiveFrom, effective_to AS effectiveTo FROM agency_fee_rules"),
+    db.prepare("SELECT seller_sku AS sku, cost_per_unit AS costPerUnit, effective_from AS effectiveFrom, effective_to AS effectiveTo FROM return_shipping_rules ORDER BY effective_from"),
+    db.prepare("SELECT period, cost_category AS category, seller_sku AS sku, amount FROM manual_costs WHERE period >= ? AND period <= ?").bind(range.from.slice(0, 7), range.to),
     db.prepare(`SELECT return_id AS returnId, order_id AS orderId, line_item_id AS lineItemId, sku, reason, return_type AS returnType,
       quantity, refund_amount AS refundAmount, status, requested_at AS requestedAt FROM return_lines r
-      WHERE EXISTS (SELECT 1 FROM sales_lines s WHERE s.order_id=r.order_id AND s.ordered_at>=? AND s.ordered_at<?)`).bind(range.start, range.end).all<ReturnFact>(),
+      WHERE EXISTS (SELECT 1 FROM sales_lines s WHERE s.order_id=r.order_id AND s.ordered_at>=? AND s.ordered_at<?)`).bind(range.start, range.end),
     db.prepare(`SELECT statement_time AS statementTime,settlement_amount AS settlementAmount,revenue_amount AS revenueAmount,
       fee_amount AS feeAmount,adjustment_amount AS adjustmentAmount,shipping_cost_amount AS shippingAmount
-      FROM finance_statements WHERE statement_time>=? AND statement_time<? ORDER BY statement_time`).bind(range.start, range.end).all<FinanceStatementFact>(),
+      FROM finance_statements WHERE statement_time>=? AND statement_time<? ORDER BY statement_time`).bind(range.start, range.end),
     db.prepare(`SELECT ac.order_id AS orderId,ac.sku,ac.amount,ac.status FROM affiliate_commissions ac
       WHERE EXISTS (SELECT 1 FROM sales_lines s WHERE s.order_id=ac.order_id AND s.ordered_at>=? AND s.ordered_at<?)`)
-      .bind(range.start,range.end).all<{orderId:string;sku:string;amount:number|null;status:string}>(),
-  ]);
+      .bind(range.start,range.end),
+  ]) as [D1Result<SalesFact>, D1Result<CostFact>, D1Result<CostFact>, D1Result<ExpenseFact>, D1Result<AgencyRule>, D1Result<ReturnShippingRule>, D1Result<ManualCost>, D1Result<ReturnFact>, D1Result<FinanceStatementFact>, D1Result<{orderId:string;sku:string;amount:number|null;status:string}>];
   const dimensions = {
     products: [...new Set(salesResult.results.map((line) => line.productName).filter(Boolean))].sort(),
     skus: [...new Set(salesResult.results.map((line) => line.sku).filter(Boolean))].sort(),
@@ -665,14 +668,14 @@ export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = 
 
 export async function getReturnsSnapshot(db: D1Database, filters: SnapshotFilters = {}) {
   const range = periodBounds(filters.from, filters.to);
-  const [salesResult, returnsResult, createdResult, shippingResult] = await Promise.all([
-    db.prepare(`${salesQuery()} WHERE s.ordered_at>=? AND s.ordered_at<?`).bind(range.start, range.end).all<SalesFact>(),
+  const [salesResult, returnsResult, createdResult, shippingResult] = await db.batch([
+    db.prepare(`${salesQuery()} WHERE s.ordered_at>=? AND s.ordered_at<?`).bind(range.start, range.end),
     db.prepare(`SELECT return_id AS returnId, order_id AS orderId, line_item_id AS lineItemId, sku, reason, return_type AS returnType,
       quantity, refund_amount AS refundAmount, status, requested_at AS requestedAt FROM return_lines r
-      WHERE EXISTS (SELECT 1 FROM sales_lines s WHERE s.order_id=r.order_id AND s.ordered_at>=? AND s.ordered_at<?)`).bind(range.start, range.end).all<ReturnFact>(),
-    db.prepare("SELECT COUNT(DISTINCT return_id) AS count FROM return_lines WHERE requested_at>=? AND requested_at<?").bind(range.start, range.end).first<{ count: number }>(),
-    db.prepare("SELECT seller_sku AS sku, cost_per_unit AS costPerUnit, effective_from AS effectiveFrom, effective_to AS effectiveTo FROM return_shipping_rules ORDER BY effective_from").all<ReturnShippingRule>(),
-  ]);
+      WHERE EXISTS (SELECT 1 FROM sales_lines s WHERE s.order_id=r.order_id AND s.ordered_at>=? AND s.ordered_at<?)`).bind(range.start, range.end),
+    db.prepare("SELECT COUNT(DISTINCT return_id) AS count FROM return_lines WHERE requested_at>=? AND requested_at<?").bind(range.start, range.end),
+    db.prepare("SELECT seller_sku AS sku, cost_per_unit AS costPerUnit, effective_from AS effectiveFrom, effective_to AS effectiveTo FROM return_shipping_rules ORDER BY effective_from"),
+  ]) as [D1Result<SalesFact>, D1Result<ReturnFact>, D1Result<{count:number}>, D1Result<ReturnShippingRule>];
   const dimensions = {
     products: [...new Set(salesResult.results.map((line) => line.productName).filter(Boolean))].sort(),
     skus: [...new Set(salesResult.results.map((line) => line.sku).filter(Boolean))].sort(),
@@ -688,7 +691,7 @@ export async function getReturnsSnapshot(db: D1Database, filters: SnapshotFilter
   const totalSoldUnits = filteredSales.filter(line=>validSale(line.orderStatus)).reduce((sum,line)=>sum+line.quantity,0);
   const sampleUnits = filteredSales.filter(line=>validSale(line.orderStatus) && sampleSale(line)).reduce((sum,line)=>sum+line.quantity,0);
   return { range: { from: range.from, to: range.to }, granularity: normalizedGranularity(filters.granularity), dimensions,
-    returnsCreatedDuringPeriod: createdResult?.count || 0, totalSoldUnits, sampleUnits, commercialSoldUnits: Math.max(0,totalSoldUnits-sampleUnits), ...calculateReturns(filteredSales, filteredReturns, shippingResult.results, normalizedGranularity(filters.granularity)),
+    returnsCreatedDuringPeriod: createdResult.results[0]?.count || 0, totalSoldUnits, sampleUnits, commercialSoldUnits: Math.max(0,totalSoldUnits-sampleUnits), ...calculateReturns(filteredSales, filteredReturns, shippingResult.results, normalizedGranularity(filters.granularity)),
     sources: [{ metric: "Return Rate", source: "TikTok Orders + Returns API commercial sales cohort; sample orders excluded from numerator and denominator" }, { metric: "Sold Units", source: "TikTok Orders API; total and non-sample counts retained separately" }, { metric: "Returns / Reasons / Refunds", source: "TikTok Returns & Refunds API joined to original non-sample order + SKU" }, { metric: "Return Shipping", source: "Finance actual when available; uploaded per-unit rule fallback" }] };
 }
 
