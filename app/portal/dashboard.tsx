@@ -124,10 +124,12 @@ export default function Dashboard({ email, admin, initialAllowed }: { email: str
       const previousToDate = new Date(start.getTime() - 86_400_000), previousFromDate = new Date(previousToDate.getTime() - (days - 1) * 86_400_000);
       const previousQuery = new URLSearchParams({ from: dateInput(previousFromDate), to: dateInput(previousToDate), granularity, product, sku, returnType, returnStatus });
       const previousReturnsQuery = new URLSearchParams({ from: dateInput(previousFromDate), to: dateInput(previousToDate), granularity, product, sku: "ALL", returnType, returnStatus });
-      const [pnlData, returnsData, priorPnlData, priorReturnsData, syncData] = await Promise.all([
-        getJson<PnlData>(`/api/bi/pnl?${query}`), getJson<ReturnsData>(`/api/bi/returns?${returnsQuery}`),
-        getJson<PnlData>(`/api/bi/pnl?${previousQuery}`), getJson<ReturnsData>(`/api/bi/returns?${previousReturnsQuery}`), getJson<SyncData>("/api/bi/sync"),
-      ]);
+      // Keep D1 traffic bounded while channel backfills are running.
+      const pnlData = await getJson<PnlData>(`/api/bi/pnl?${query}`);
+      const returnsData = await getJson<ReturnsData>(`/api/bi/returns?${returnsQuery}`);
+      const priorPnlData = await getJson<PnlData>(`/api/bi/pnl?${previousQuery}`);
+      const priorReturnsData = await getJson<ReturnsData>(`/api/bi/returns?${previousReturnsQuery}`);
+      const syncData = await getJson<SyncData>("/api/bi/sync");
       setPnl(pnlData); if(tab==="tts"&&pnlData.dataThrough){setMaxDate(pnlData.dataThrough);if(to>pnlData.dataThrough)setTo(pnlData.dataThrough);} setReturns(returnsData); setPreviousPnl(priorPnlData); setPreviousReturns(priorReturnsData); setSync(syncData);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "数据读取失败"); }
     finally { setBusy(false); }
