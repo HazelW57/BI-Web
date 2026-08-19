@@ -90,8 +90,8 @@ export async function syncBby(env: BbyEnv, store: Store, from: string, to: strin
       for(const refund of (line.refunds||[]) as Obj[]){ const id=s(refund.refund_id,refund.id,`${lineId}:${refund.created_date||refund.date_created||refund.reason_code}`); const qty=Math.max(1,n(refund.quantity)||1); await bbyDatabase(env,store).prepare(`INSERT INTO ${t.returns} VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET reason=excluded.reason,quantity=excluded.quantity,refund_amount=excluded.refund_amount,status=excluded.status,raw_json=excluded.raw_json,updated_at=excluded.updated_at`).bind(`${store}:${id}`,orderId,lineId,sku,s(refund.reason_label,refund.reason_code,"Refund"),qty,n(refund.amount)||n(refund.refund_amount),s(refund.state,refund.status,"REFUNDED"),ts(refund.created_date,refund.date_created,order.last_updated_date),JSON.stringify(refund),Date.now()).run(); returnsCount++; }
     }} if(orders.length<100) break; offset+=orders.length;
   }
-  const reasons=await syncBbyReturnReasons(env,store,from,to);await bbyDatabase(env,store).prepare(`INSERT INTO ${t.windows} VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status='success',orders_count=excluded.orders_count,returns_count=excluded.returns_count,updated_at=excluded.updated_at`).bind(windowId,from,to,"success",ordersCount,returnsCount,Date.now()).run();
-  return {store,orders:ordersCount,returns:returnsCount,reasons,skipped:false};
+  await bbyDatabase(env,store).prepare(`INSERT INTO ${t.windows} VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status='success',orders_count=excluded.orders_count,returns_count=excluded.returns_count,updated_at=excluded.updated_at`).bind(windowId,from,to,"success",ordersCount,returnsCount,Date.now()).run();
+  return {store,orders:ordersCount,returns:returnsCount,skipped:false};
 }
 
 export async function getBbyReturns(db:D1Database, input:{store:string;from:string;to:string;granularity:Granularity;sku?:string}) {
