@@ -96,6 +96,10 @@ export async function syncBby(env: BbyEnv, store: Store, from: string, to: strin
 
 export async function getBbyReturns(db:D1Database, input:{store:string;from:string;to:string;granularity:Granularity;sku?:string}) {
   const store:Store=input.store==="JS"?"JS":"SAP",t=tables(store);
+  // Each BBY storefront has an independent D1 database. A read may be the
+  // first request after a new schema version is deployed, so apply the
+  // idempotent storefront schema before querying optional/newer tables.
+  await ensureBbySchema(db,store);
   const start=Date.parse(`${input.from}T00:00:00Z`),end=Date.parse(`${input.to}T23:59:59Z`);
   if(!Number.isFinite(start)||!Number.isFinite(end)||start>end)throw new Error("Invalid Best Buy date range");
   const [salesResult,returnsResult,createdResult,excludedResult]=await Promise.all([
