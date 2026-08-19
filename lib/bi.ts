@@ -582,7 +582,7 @@ export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = 
   // Keep the dashboard read on a single D1 batch. Opening ten concurrent D1
   // queries from one request intermittently exhausted the Worker connection
   // budget and surfaced as a slow HTTP 500 even though the data was healthy.
-  const [salesResult, legacyCosts, costsResult, expensesResult, agencyResult, shippingResult, manualResult, returnsResult, statementsResult, affiliateResult, coverageResult] = await db.batch([
+  const [salesResult, legacyCosts, costsResult, expensesResult, agencyResult, shippingResult, manualResult, returnsResult, statementsResult, affiliateResult] = await db.batch([
     db.prepare(`${salesQuery()} WHERE s.ordered_at >= ? AND s.ordered_at < ? ORDER BY s.ordered_at`).bind(range.start, range.end),
     db.prepare("SELECT sku, effective_from AS effectiveFrom, product_cost AS productCost FROM sku_costs ORDER BY effective_from"),
     db.prepare("SELECT seller_sku AS sku, product_name AS productName, unit_cost AS productCost, effective_from AS effectiveFrom, effective_to AS effectiveTo FROM product_cost_rules ORDER BY effective_from"),
@@ -599,8 +599,7 @@ export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = 
     db.prepare(`SELECT ac.order_id AS orderId,ac.sku,ac.amount,ac.status FROM affiliate_commissions ac
       WHERE EXISTS (SELECT 1 FROM sales_lines s WHERE s.order_id=ac.order_id AND s.ordered_at>=? AND s.ordered_at<?)`)
       .bind(range.start,range.end),
-    db.prepare("SELECT MAX(ordered_at) AS latest FROM sales_lines"),
-  ]) as [D1Result<SalesFact>, D1Result<CostFact>, D1Result<CostFact>, D1Result<ExpenseFact>, D1Result<AgencyRule>, D1Result<ReturnShippingRule>, D1Result<ManualCost>, D1Result<ReturnFact>, D1Result<FinanceStatementFact>, D1Result<{orderId:string;sku:string;amount:number|null;status:string}>, D1Result<{latest:number|null}>];
+  ]) as [D1Result<SalesFact>, D1Result<CostFact>, D1Result<CostFact>, D1Result<ExpenseFact>, D1Result<AgencyRule>, D1Result<ReturnShippingRule>, D1Result<ManualCost>, D1Result<ReturnFact>, D1Result<FinanceStatementFact>, D1Result<{orderId:string;sku:string;amount:number|null;status:string}>];
   const dimensions = {
     products: [...new Set(salesResult.results.map((line) => line.productName).filter(Boolean))].sort(),
     skus: [...new Set(salesResult.results.map((line) => line.sku).filter(Boolean))].sort(),
@@ -656,7 +655,7 @@ export async function getPnlSnapshot(db: D1Database, filters: SnapshotFilters = 
   const orderMix = { commercialOrders: new Set(commercialLines.map(line => line.orderId)).size, sampleOrders: new Set(sampleLines.map(line => line.orderId)).size,
     returnedOrders: new Set(returnsResult.results.filter(item => completedReturn(item.status)).map(item => item.orderId).filter(Boolean)).size,
     commercialUnits: commercialLines.reduce((sum,line)=>sum+line.quantity,0), sampleUnits: sampleLines.reduce((sum,line)=>sum+line.quantity,0) };
-  return { range: { from: range.from, to: range.to }, dataThrough: coverageResult.results[0]?.latest ? new Date(coverageResult.results[0].latest).toISOString().slice(0,10) : null, granularity: normalizedGranularity(filters.granularity), dimensions, ...calculated,
+  return { range: { from: range.from, to: range.to }, granularity: normalizedGranularity(filters.granularity), dimensions, ...calculated,
     ...reconciled, financeCoverage, affiliateCoverage, orderMix,
     sources: [
       { metric: "GMV / Orders / Units", source: "TikTok Orders API", status: "actual" },
