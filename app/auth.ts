@@ -48,6 +48,28 @@ async function verifyPassword(password: string, expected: string, salt: string) 
   return mismatch === 0;
 }
 
+function constantTimeTextEqual(leftValue: string, rightValue: string) {
+  const left = encoder.encode(leftValue);
+  const right = encoder.encode(rightValue);
+  const length = Math.max(left.length, right.length);
+  let mismatch = left.length ^ right.length;
+  for (let index = 0; index < length; index += 1) {
+    mismatch |= (left[index] ?? 0) ^ (right[index] ?? 0);
+  }
+  return mismatch === 0;
+}
+
+function bootstrapAdminSession(email: string, password: string): Session | null {
+  const { PRIMARY_BOOTSTRAP_PASSWORD, RECOVERY_BOOTSTRAP_PASSWORD } = runtime();
+  const credential = email === PRIMARY_ADMIN_EMAIL
+    ? { password: PRIMARY_BOOTSTRAP_PASSWORD, role: "owner" as const }
+    : email === RECOVERY_ADMIN_EMAIL
+      ? { password: RECOVERY_BOOTSTRAP_PASSWORD, role: "recovery" as const }
+      : null;
+  if (!credential?.password || !constantTimeTextEqual(password, credential.password)) return null;
+  return { email, role: credential.role, exp: Date.now() + 8 * 60 * 60 * 1000 };
+}
+
 async function ensureAuth() {
   const { DB, PRIMARY_BOOTSTRAP_PASSWORD, RECOVERY_BOOTSTRAP_PASSWORD, SESSION_SECRET } = runtime();
   if (!SESSION_SECRET || !PRIMARY_BOOTSTRAP_PASSWORD || !RECOVERY_BOOTSTRAP_PASSWORD) {
@@ -95,11 +117,26 @@ async function sign(value: string) {
 }
 
 export async function authenticate(email: string, password: string): Promise<Session | null> {
-  await ensureAuth();
   const normalized = email.trim().toLowerCase();
-  const row = await runtime().DB.prepare("SELECT email,password_hash AS passwordHash,salt,role FROM auth_users WHERE email = ?").bind(normalized).first<{email:string;passwordHash:string;salt:string;role:Role}>();
-  if (!row || !(await verifyPassword(password, row.passwordHash, row.salt))) return null;
-  return { email: row.email, role: row.role, exp: Date.now() + 8 * 60 * 60 * 1000 };
+  try {
+    // Authentication is read-only during normal login. Schema/bootstrap writes
+    // belong to access management and must not consume D1 quota on every login.
+    const row = await runtime().DB.prepare("SELECT email,password_hash AS passwordHash,salt,role FROM auth_users WHERE email = ?").bind(normalized).first<{email:string;passwordHash:string;salt:string;role:Role}>();
+    if (row && await verifyPassword(password, row.passwordHash, row.salt)) {
+      return { email: row.email, role: row.role, exp: Date.now() + 8 * 60 * 60 * 1000 };
+    }
+    return bootstrapAdminSession(normalized, password);
+  } catch (error) {
+    // Owners retain emergency access when D1 is temporarily unavailable or has
+    // reached its daily quota. The same deployment secrets and signed session
+    // format are used; viewer credentials never bypass D1.
+    const fallback = bootstrapAdminSession(normalized, password);
+    if (fallback) {
+      console.warn("D1 unavailable during login; owner fallback used", error instanceof Error ? error.message : String(error));
+      return fallback;
+    }
+    throw error;
+  }
 }
 
 export async function setSession(session: Session) {
